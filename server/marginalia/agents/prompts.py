@@ -70,8 +70,11 @@ def course_outline(course: Course, current_deck: str | None = None, limit: int =
     return out if len(out) <= limit else out[:limit] + "\n（大綱過長，後面截斷）"
 
 
-def _region_text(region: dict) -> str:
-    x, y, w, h = (float(region.get(k, 0)) for k in ("x", "y", "w", "h"))
+def _region_text(region: dict) -> str | None:
+    try:
+        x, y, w, h = (min(max(float(region.get(k, 0)), 0.0), 1.0) for k in ("x", "y", "w", "h"))
+    except (TypeError, ValueError):
+        return None
     return (
         f"學生在投影片上框選了一塊區域：水平 {x:.0%}–{x + w:.0%}、垂直 {y:.0%}–{y + h:.0%}（從左上角算）。"
         "先讀投影片圖片看那一塊是什麼，回答要聚焦在那裡。"
@@ -125,6 +128,6 @@ def build_system(
     if selection and (text := str(selection.get("text") or "").strip()):
         source = {"note": "筆記", "slide": "投影片", "transcript": "逐字稿"}.get(str(selection.get("source")), "畫面")
         parts.append(f"# 學生選取的文字（來自{source}）\n\n> " + text[:4000].replace("\n", "\n> "))
-    if region:
-        parts.append(f"# 學生框選的區域\n\n{_region_text(region)}")
+    if isinstance(region, dict) and (text := _region_text(region)):
+        parts.append(f"# 學生框選的區域\n\n{text}")
     return "\n\n".join(parts)

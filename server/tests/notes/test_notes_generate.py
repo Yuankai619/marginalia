@@ -113,3 +113,25 @@ def test_notefile_roundtrip(tmp_path):
     meta, body = notefile.read(p)
     assert meta["title"] == "核心" and body == "正文\n\n## 補充\n- a"
     assert notefile.parse("no front matter") == ({}, "no front matter")
+
+
+def test_short_flash_goes_to_the_writer_not_auto_skip(course, calls):
+    from marginalia.store import write_json
+
+    al = course.alignment()
+    al["segments"].append({"video": "v1", "start": 200.0, "end": 203.0, "deck": "d1", "slide": 3, "score": 0.5, "manual": False})
+    write_json(course.gen / "alignment.json", al)
+    generate.generate_deck(course, "d1", slides=[3])
+    assert len(calls) == 1 and "unrelated chat after class" in calls[0].prompt
+
+
+def test_edited_during_generation_is_kept(course, monkeypatch):
+    path = course.note_path("d1", 1)
+
+    async def user_edits_meanwhile(call):
+        notefile.write(path, {"slide": 1, "status": "edited"}, "使用者剛改的")
+        return "模型的版本"
+
+    monkeypatch.setattr(claude, "complete", user_edits_meanwhile)
+    generate.generate_deck(course, "d1", slides=[1])
+    assert notefile.read(path)[1] == "使用者剛改的"

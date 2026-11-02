@@ -126,6 +126,7 @@ def test_rules_check(course):
     assert "08:20 對不到這頁逐字稿任何一句的開頭。" in problems
     assert "影片 v9 不是這頁出現的影片。" in problems
     assert "時間點 t=abc 不是秒數。" in problems
+    assert rules.check("[x](video:v1?t=1e999)", m)[0]["problem"] == "時間點 t=1e999 不是秒數。"
     assert rules.check("kernel 透過 system call 提供服務 [01:04](video:v1?t=64)。", m) == []
     assert rules.check("[01:33](video:v1?t=93)", m) == []  # within LINE_SLACK of the t=90 line
 
@@ -138,5 +139,6 @@ def test_links_without_transcript_use_the_on_screen_range(course):
 
 
 def test_normalize_links():
+    assert rules.normalize_links("[x](video:v1?t=nan)") == "[x](video:v1?t=nan)"
     assert rules.normalize_links("[0:00](video:v1?t=3725.4)") == "[1:02:05](video:v1?t=3725)"
     assert rules.normalize_links("[a](video:v1?t=x)") == "[a](video:v1?t=x)"

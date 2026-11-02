@@ -36,6 +36,7 @@ def test_selection_and_region(course):
     )
     assert "學生選取的文字（來自筆記）\n\n> kernel mode\n> 是什麼" in s
     assert "水平 10%–40%、垂直 20%–45%" in s
+    assert "# 學生框選的區域" not in prompts.build_system(course, "qa", "d1", 1, region={"x": "abc"})
 
 
 def test_outline_falls_back_to_titles(course):

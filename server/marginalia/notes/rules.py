@@ -21,6 +21,7 @@ EMOJI = re.compile("[\U0001f300-\U0001faff☀-➿⭐⬆⬇⬅➡✅❌✨]")
 BOLD = re.compile(r"\*\*[^*\n]+\*\*")
 QUESTION_HEADING = re.compile(r"^#+\s.*[?？]\s*$", re.MULTILINE)
 LINK = re.compile(r"\[([^\]\n]*)\]\(video:([^)\s?]*)\?t=([^)\s]*)\)")
+SECONDS = re.compile(r"\d{1,6}(?:\.\d+)?")
 MAX_BOLD = 3
 LINE_SLACK = 3.0  # seconds a cited t may sit from the start of a transcript line
 
@@ -37,10 +38,9 @@ def normalize_links(body: str) -> str:
     """Rewrite each timestamp label from its t= value so the chip text never disagrees with the seek target."""
 
     def fix(m: re.Match) -> str:
-        try:
-            t = float(m.group(3))
-        except ValueError:
+        if not SECONDS.fullmatch(m.group(3)):
             return m.group(0)
+        t = float(m.group(3))
         return f"[{clock(t)}](video:{m.group(2)}?t={t:.0f})"
 
     return LINK.sub(fix, body)
@@ -52,11 +52,10 @@ def check_links(body: str, m: Material) -> list[dict]:
     for lk in LINK.finditer(body):
         label, video, t = lk.groups()
         quote = _context(body, lk.start(), lk.end())
-        try:
-            sec = float(t)
-        except ValueError:
+        if not SECONDS.fullmatch(t):
             out.append(_finding("high", quote, f"時間點 t={t} 不是秒數。", "改成逐字稿裡那一句的秒數。"))
             continue
+        sec = float(t)
         if video not in videos:
             out.append(_finding("high", quote, f"影片 {video} 不是這頁出現的影片。", "改用這頁出現的影片與逐字稿裡的時間。"))
         elif m.lines:

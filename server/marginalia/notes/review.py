@@ -153,9 +153,7 @@ class Reviewer:
             record["errors"] = errors
         write_json(self.course.review_path(self.deck_id, index), record)
         if editable:
-            current = notefile.read(path)  # the user may have started editing while we reviewed
-            if force or (current and current[0].get("status") != "edited"):
-                notefile.write(path, {**front, **meta(m, "reviewed")}, body)
+            notefile.write_unless_edited(path, {**front, **meta(m, "reviewed")}, body, force)
         return record
 
 

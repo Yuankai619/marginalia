@@ -73,7 +73,8 @@ class Gatherer:
         if not 1 <= index <= len(self.slides):
             raise IndexError(f"slide {index} not in deck {self.deck['id']}")
         slide = self.slides[index - 1]
-        ranges = slide_ranges(self.course, self.deck["id"], index)
+        # short flashes are usually alignment noise, but if that is all there is, let the writer judge the transcript
+        ranges = slide_ranges(self.course, self.deck["id"], index) or slide_ranges(self.course, self.deck["id"], index, 0.0)
         lines: list[dict] = []
         partial = False
         for r in ranges:

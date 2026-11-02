@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +39,29 @@ def read(path: Path) -> tuple[dict, str] | None:
 
 def write(path: Path, meta: dict, body: str) -> None:
     write_text(path, dump(meta, body))
+
+
+@contextmanager
+def locked(path: Path) -> Iterator[None]:
+    """Serialize check-then-write on one deck's notes across threads and processes. Every writer, including the
+    API's save, should hold it, so a note the user just edited is never replaced by a generated one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.parent / ".lock", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def write_unless_edited(path: Path, meta: dict, body: str, force: bool = False) -> bool:
+    """Write the note unless the user has edited it (re-checked under the lock). Returns whether it was written."""
+    with locked(path):
+        current = read(path)
+        if not force and current is not None and current[0].get("status") == "edited":
+            return False
+        write(path, meta, body)
+        return True
 
 
 def now() -> str:

@@ -78,12 +78,6 @@ def targets(course: Course, deck_id: str, count: int, slides: list[int] | None, 
     return out
 
 
-def _still_writable(course: Course, deck_id: str, index: int, force: bool) -> bool:
-    """Re-checked right before writing: the user may have edited the note while the model was busy."""
-    existing = notefile.read(course.note_path(deck_id, index))
-    return force or existing is None or existing[0].get("status") != "edited"
-
-
 async def write_note(course: Course, m: Material, aligned: bool, force: bool = False) -> str:
     """Write one slide's note and return its status."""
     path = course.note_path(m.deck["id"], m.index)
@@ -103,8 +97,7 @@ async def write_note(course: Course, m: Material, aligned: bool, force: bool = F
             status, body = "generated", clean(out)
         if not body:
             raise RuntimeError(f"第 {m.index} 頁模型沒有回傳內容")
-    if _still_writable(course, m.deck["id"], m.index, force):
-        notefile.write(path, meta(m, status), body)
+    notefile.write_unless_edited(path, meta(m, status), body, force)  # the user may have edited it meanwhile
     return status
 
 
