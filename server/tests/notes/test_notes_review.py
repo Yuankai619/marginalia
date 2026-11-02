@@ -39,7 +39,7 @@ def fake_models(monkeypatch, revised="kernel 管理 CPU、記憶體和 I/O [00:3
 def test_review_writes_findings_and_revises(written, monkeypatch):
     seen = fake_models(monkeypatch)
     out = review.review_deck(written, "d1")
-    assert out == {"reviewed": [1, 2], "revised": [1, 2], "failed": {}}  # slide 3 is skipped: nothing to review
+    assert out == {"reviewed": [1, 2], "revised": [1, 2]}  # slide 3 is skipped: nothing to review
 
     rec = read_json(written.review_path("d1", 1))
     by = {f["reviewer"] for f in rec["findings"]}

@@ -8,6 +8,7 @@ from pathlib import Path
 from ..align import slide_ranges
 from ..store import Course, read_json, slide_name
 
+MIN_RANGE = 6.0  # on-screen stretches shorter than this are usually alignment flicker
 PAD = 5.0  # seconds of transcript kept around each on-screen range; teachers often start a point just before flipping
 MAX_TRANSCRIPT_CHARS = 30_000  # ~50 minutes of speech; a slide that stays up longer gets its tail cut
 
@@ -44,6 +45,10 @@ class Material:
         return self.slide["index"]
 
     @property
+    def images(self) -> list[Path]:
+        return [self.image] if self.image.exists() else []
+
+    @property
     def videos(self) -> list[str]:
         return list(dict.fromkeys(r["video"] for r in self.ranges))
 
@@ -63,6 +68,8 @@ class Gatherer:
         self.slides = course.slides(deck_id)
         self.outline = outline(self.slides)
         self._transcripts: dict[str, tuple[list[dict], bool]] = {}
+        # without any alignment for the deck we can't tell skipped slides apart; writers then work from slides only
+        self.aligned = any(s["deck"] == deck_id for s in course.alignment().get("segments", []))
 
     def transcript(self, video: str) -> tuple[list[dict], bool]:
         if video not in self._transcripts:
@@ -74,7 +81,8 @@ class Gatherer:
             raise IndexError(f"slide {index} not in deck {self.deck['id']}")
         slide = self.slides[index - 1]
         # short flashes are usually alignment noise, but if that is all there is, let the writer judge the transcript
-        ranges = slide_ranges(self.course, self.deck["id"], index) or slide_ranges(self.course, self.deck["id"], index, 0.0)
+        every = slide_ranges(self.course, self.deck["id"], index, 0.0)
+        ranges = [r for r in every if r["end"] - r["start"] >= MIN_RANGE] or every
         lines: list[dict] = []
         partial = False
         for r in ranges:

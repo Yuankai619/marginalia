@@ -17,11 +17,13 @@ from .. import config
 from ..llm import claude, codex
 from ..store import Course, write_json
 from . import notefile, rules
-from .generate import STYLE, Progress, clean, meta
+from .batch import Progress, run_slides, select
+from .generate import STYLE, meta, parse_output
 from .generate import SYSTEM as WRITER_SYSTEM
 from .material import Gatherer, Material, render
 
 SEVERITIES = ("high", "medium", "low")
+SYSTEM = f"你是作業系統課講義的審稿人。學生會拿這份筆記搭配投影片和上課影片讀。以下是筆記的寫作規範：\n\n{STYLE}"
 
 OUTPUT = """## 輸出格式
 
@@ -95,22 +97,20 @@ class Reviewer:
         self.g = Gatherer(course, deck_id)
         self.sem = asyncio.Semaphore(max(1, config.GEN_CONCURRENCY))
         self.codex_home = codex_home if codex_home and codex.available(codex_home) else None
-        self.system = f"你是作業系統課講義的審稿人。學生會拿這份筆記搭配投影片和上課影片讀。以下是筆記的寫作規範：\n\n{STYLE}"
 
     async def _claude(self, prompt: str, system: str, m: Material, model: str) -> str:
-        call = claude.Call(prompt=prompt, system=system, images=[m.image] if m.image.exists() else [], model=model)
+        call = claude.Call(prompt=prompt, system=system, images=m.images, model=model)
         async with self.sem:
             return await claude.complete(call)
 
     async def _review(self, name: str, m: Material, body: str) -> list[dict]:
-        out = await self._claude(reviewer_prompt(m, body, REVIEWERS[name]), self.system, m, config.REVIEW_MODEL)
+        out = await self._claude(reviewer_prompt(m, body, REVIEWERS[name]), SYSTEM, m, config.REVIEW_MODEL)
         return parse_findings(out, name)
 
     async def _codex(self, m: Material, body: str) -> list[dict]:
-        prompt = f"{self.system}\n\n{reviewer_prompt(m, body, REVIEWERS['correctness'])}"
-        images = [m.image] if m.image.exists() else []
+        prompt = f"{SYSTEM}\n\n{reviewer_prompt(m, body, REVIEWERS['correctness'])}"
         async with self.sem:
-            out = await codex.complete(prompt, codex_home=self.codex_home, images=images)
+            out = await codex.complete(prompt, codex_home=self.codex_home, images=m.images)
         return parse_findings(out, "codex-correctness")
 
     async def review_slide(self, index: int, force: bool = False) -> dict | None:
@@ -137,37 +137,25 @@ class Reviewer:
             raise RuntimeError(f"第 {index} 頁審稿全部失敗：{next(iter(errors.values()))}")
         findings.sort(key=lambda f: SEVERITIES.index(f["severity"]))
 
-        revised = False
-        editable = force or front.get("status") != "edited"
+        revised, status = False, "reviewed"
+        editable = force or front.get("status", "edited") != "edited"
         if editable and any(f["severity"] != "low" for f in findings):
             prompt = (
                 f"{render(m)}\n\n## 目前的筆記\n\n{body}\n\n## 審稿意見\n\n{findings_text(findings)}\n\n"
                 f"{REVISE.format(index=index)}"
             )
-            new_body = clean(await self._claude(prompt, WRITER_SYSTEM, m, config.WRITER_MODEL))
+            new_status, new_body = parse_output(await self._claude(prompt, WRITER_SYSTEM, m, config.WRITER_MODEL))
             if new_body:
                 body, revised = new_body, True
+                status = "skipped" if new_status == "skipped" else status
 
         record = {"findings": findings, "revised": revised, "reviewedAt": notefile.now()}
         if errors:
             record["errors"] = errors
         write_json(self.course.review_path(self.deck_id, index), record)
         if editable:
-            notefile.write_unless_edited(path, {**front, **meta(m, "reviewed")}, body, force)
+            notefile.write_unless_edited(path, {**front, **meta(m, status)}, body, force)
         return record
-
-
-def targets(course: Course, deck_id: str, count: int, slides: list[int] | None, force: bool) -> list[int]:
-    """Generated notes when resuming; any listed note otherwise (edited ones get findings, not rewrites)."""
-    out = []
-    for i in slides if slides is not None else range(1, count + 1):
-        if not 1 <= i <= count:
-            raise IndexError(f"slide {i} not in deck {deck_id}")
-        note = notefile.read(course.note_path(deck_id, i))
-        status = note[0].get("status") if note else None
-        if status == "generated" or (status in ("reviewed", "edited") and (slides is not None or force)):
-            out.append(i)
-    return out
 
 
 async def areview_deck(
@@ -180,35 +168,20 @@ async def areview_deck(
 ) -> dict:
     progress = progress or (lambda f, msg: None)
     rv = Reviewer(course, deck_id, codex_home)
-    todo = targets(course, deck_id, len(rv.g.slides), slides, force)
-    result: dict = {"reviewed": [], "revised": [], "failed": {}}
+    # resuming reviews generated notes; listed slides are reviewed again (edited ones get findings, not rewrites)
+    todo = select(
+        course, deck_id, len(rv.g.slides), slides,
+        lambda s: s == "generated" or (s in ("reviewed", "edited") and (slides is not None or force)),
+    )  # fmt: skip
     if not todo:
         progress(1.0, "沒有需要審稿的筆記")
-        return result
-    done = 0
-
-    async def one(i: int) -> None:
-        nonlocal done
-        try:
-            rec = await rv.review_slide(i, force)
-            if rec is not None:
-                result["reviewed"].append(i)
-                if rec["revised"]:
-                    result["revised"].append(i)
-        except Exception as e:  # noqa: BLE001 -- reported per slide, the rest carry on
-            result["failed"][i] = str(e) or type(e).__name__
-        done += 1
-        progress(done / len(todo), f"審稿 {done}/{len(todo)}（第 {i} 頁）")
-
-    engines = "Claude＋Codex" if rv.codex_home else "Claude"
-    progress(0.0, f"審稿 {len(todo)} 頁（{engines}）")
-    await asyncio.gather(*(one(i) for i in todo))
-    for k in ("reviewed", "revised"):
-        result[k].sort()
-    if result["failed"]:
-        pages = "、".join(str(i) for i in sorted(result["failed"]))
-        raise RuntimeError(f"第 {pages} 頁審稿失敗：{next(iter(result['failed'].values()))}")
-    return result
+        return {"reviewed": [], "revised": []}
+    progress(0.0, f"審稿 {len(todo)} 頁（{'Claude＋Codex' if rv.codex_home else 'Claude'}）")
+    records = await run_slides(todo, lambda i: rv.review_slide(i, force), "審稿", progress)
+    return {
+        "reviewed": [i for i, r in records.items() if r is not None],
+        "revised": [i for i, r in records.items() if r and r["revised"]],
+    }
 
 
 def review_deck(
@@ -219,6 +192,7 @@ def review_deck(
     force: bool = False,
     codex_home: Path | None = None,
 ) -> dict:
-    """Blocking wrapper for job threads. `codex_home` adds Codex as a second correctness reviewer when it is
-    logged in there; otherwise Codex is skipped. Raises if any slide failed, after the others are done."""
+    """Blocking wrapper for job threads. Returns {reviewed:[i], revised:[i]}. `codex_home` adds Codex as a second
+    correctness reviewer when it is logged in there; otherwise Codex is skipped. Raises if any slide failed, after
+    the others are done."""
     return asyncio.run(areview_deck(course, deck_id, progress, slides, force, codex_home))

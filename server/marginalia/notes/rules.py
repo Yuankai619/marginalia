@@ -35,7 +35,8 @@ def _context(text: str, start: int, end: int, pad: int = 12) -> str:
 
 
 def normalize_links(body: str) -> str:
-    """Rewrite each timestamp label from its t= value so the chip text never disagrees with the seek target."""
+    """Rewrite each timestamp label from its t= value (rounded to whole seconds) so the chip text never disagrees
+    with the seek target. Links whose t= is not a plain number are left for `check_links` to report."""
 
     def fix(m: re.Match) -> str:
         if not SECONDS.fullmatch(m.group(3)):
@@ -68,7 +69,7 @@ def check_links(body: str, m: Material) -> list[dict]:
     return out
 
 
-def check(body: str, m: Material | None = None) -> list[dict]:
+def check(body: str, m: Material) -> list[dict]:
     out = []
     for w in BANNED:
         for hit in re.finditer(re.escape(w), body):
@@ -87,6 +88,4 @@ def check(body: str, m: Material | None = None) -> list[dict]:
         out.append(_finding("medium", "、".join(bolds[:6]), f"粗體 {len(bolds)} 處，超過 {MAX_BOLD} 處。", "只留關鍵名詞第一次出現時的粗體。"))
     for hit in QUESTION_HEADING.finditer(body):
         out.append(_finding("low", hit.group(0).strip(), "問句當標題。", "改成描述性的短標題，或拿掉標題。"))
-    if m is not None:
-        out.extend(check_links(body, m))
-    return out
+    return out + check_links(body, m)

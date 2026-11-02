@@ -45,7 +45,7 @@ def test_partial_transcript_is_flagged(course):
 
 def test_generate_writes_notes_and_skips_unshown_slide(course, calls):
     out = generate.generate_deck(course, "d1")
-    assert out == {"generated": [1, 2], "skipped": [3], "failed": {}}
+    assert out == {"generated": [1, 2], "skipped": [3]}
     assert len(calls) == 2  # slide 3 was never on screen: no model call
 
     meta, body = notefile.read(course.note_path("d1", 2))
@@ -72,7 +72,7 @@ def test_resume_only_fills_missing_and_edited_is_kept(course, calls):
 
 def test_model_skip_reply(course, monkeypatch):
     async def fake(call):
-        return "SKIP: 老師只是翻過這頁。\n多的字"
+        return "```\nSKIP: 老師只是翻過這頁。\n多的字\n```"
 
     monkeypatch.setattr(claude, "complete", fake)
     generate.generate_deck(course, "d1", slides=[1])
@@ -87,7 +87,7 @@ def test_failure_raises_after_other_slides_are_written(course, monkeypatch):
         return "內容"
 
     monkeypatch.setattr(claude, "complete", fake)
-    with pytest.raises(RuntimeError, match="第 1 頁產生失敗：boom"):
+    with pytest.raises(RuntimeError, match="第 1 頁產生筆記失敗：boom"):
         generate.generate_deck(course, "d1")
     assert notefile.read(course.note_path("d1", 2))[1] == "內容"
     assert notefile.read(course.note_path("d1", 1)) is None
@@ -135,3 +135,9 @@ def test_edited_during_generation_is_kept(course, monkeypatch):
     monkeypatch.setattr(claude, "complete", user_edits_meanwhile)
     generate.generate_deck(course, "d1", slides=[1])
     assert notefile.read(path)[1] == "使用者剛改的"
+
+
+def test_note_without_status_counts_as_edited(course, calls):
+    course.note_path("d1", 1).parent.mkdir(parents=True)
+    course.note_path("d1", 1).write_text("手寫的，沒有 frontmatter")
+    assert generate.generate_deck(course, "d1", slides=[1]) == {"generated": [], "skipped": []}

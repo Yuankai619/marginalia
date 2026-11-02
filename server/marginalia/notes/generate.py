@@ -10,16 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable
 from pathlib import Path
 
 from .. import config
 from ..llm import claude
 from ..store import Course
 from . import notefile, rules
+from .batch import Progress, run_slides, select
 from .material import Gatherer, Material, render
-
-Progress = Callable[[float, str], None]
 
 STYLE = (Path(__file__).parent / "style.md").read_text("utf-8")
 SYSTEM = f"""你是幫作業系統課寫講義的助教。你要把一頁投影片和老師上課講的內容，整理成一份給學生讀的筆記。
@@ -38,6 +36,7 @@ TASK = """## 任務
 LINKS_RULE = "時間點連結寫成 [mm:ss](video:<影片 id>?t=<秒數>)，秒數取逐字稿裡講到那件事的那一行開頭的 t 值。"
 NO_LINKS_RULE = "這頁沒有逐字稿，所以不要附任何時間點連結；正文只依投影片與講者備註寫，寫不出來的不要猜。"
 NOT_SHOWN = "對齊結果裡這頁沒有出現在影片上，老師沒有講解這頁。"
+NOT_TAUGHT = "老師在課堂上沒有講解這頁。"
 SKIP = re.compile(r"\A\s*SKIP\s*[:：]\s*(.*)", re.DOTALL)
 FENCE = re.compile(r"\A```(?:markdown|md)?\s*\n(.*?)\n```\s*\Z", re.DOTALL)
 
@@ -50,6 +49,14 @@ def clean(text: str) -> str:
     _, text = notefile.parse(text + "\n")
     text = re.sub(r"\A#\s[^\n]*\n+", "", text.strip())
     return rules.normalize_links(text.strip())
+
+
+def parse_output(text: str) -> tuple[str, str]:
+    """(status, body) from a writer reply: a cleaned note, or the one-line reason when the writer says SKIP."""
+    body = clean(text)
+    if skip := SKIP.match(body):
+        return "skipped", (skip.group(1).strip().splitlines() or [NOT_TAUGHT])[0]
+    return "generated", body
 
 
 def prompt(m: Material) -> str:
@@ -66,38 +73,17 @@ def meta(m: Material, status: str) -> dict:
     }
 
 
-def targets(course: Course, deck_id: str, count: int, slides: list[int] | None, force: bool) -> list[int]:
-    """Slides to write: missing notes when resuming; the listed ones otherwise; edited notes only with force."""
-    out = []
-    for i in slides if slides is not None else range(1, count + 1):
-        if not 1 <= i <= count:
-            raise IndexError(f"slide {i} not in deck {deck_id}")
-        existing = notefile.read(course.note_path(deck_id, i))
-        if existing is None or force or slides is not None and existing[0].get("status") != "edited":
-            out.append(i)
-    return out
-
-
 async def write_note(course: Course, m: Material, aligned: bool, force: bool = False) -> str:
     """Write one slide's note and return its status."""
-    path = course.note_path(m.deck["id"], m.index)
     if aligned and not m.ranges:
         status, body = "skipped", NOT_SHOWN
     else:
-        call = claude.Call(
-            prompt=prompt(m),
-            system=SYSTEM,
-            images=[m.image] if m.image.exists() else [],
-            model=config.WRITER_MODEL,
-        )
-        out = await claude.complete(call)
-        if skip := SKIP.match(out):
-            status, body = "skipped", (skip.group(1).strip().splitlines() or [NOT_SHOWN])[0]
-        else:
-            status, body = "generated", clean(out)
+        call = claude.Call(prompt=prompt(m), system=SYSTEM, images=m.images, model=config.WRITER_MODEL)
+        status, body = parse_output(await claude.complete(call))
         if not body:
             raise RuntimeError(f"第 {m.index} 頁模型沒有回傳內容")
-    notefile.write_unless_edited(path, meta(m, status), body, force)  # the user may have edited it meanwhile
+    # re-checked under the lock: the user may have edited the note while the model was busy
+    notefile.write_unless_edited(course.note_path(m.deck["id"], m.index), meta(m, status), body, force)
     return status
 
 
@@ -106,40 +92,25 @@ async def agenerate_deck(
 ) -> dict:
     progress = progress or (lambda f, msg: None)
     g = Gatherer(course, deck_id)
-    todo = targets(course, deck_id, len(g.slides), slides, force)
-    aligned = any(s["deck"] == deck_id for s in course.alignment().get("segments", []))
-    result: dict = {"generated": [], "skipped": [], "failed": {}}
+    # resuming fills missing notes; listed slides are rewritten unless edited; force rewrites everything listed
+    todo = select(course, deck_id, len(g.slides), slides, lambda s: s is None or force or (slides is not None and s != "edited"))
     if not todo:
         progress(1.0, "沒有需要產生的筆記")
-        return result
-
+        return {"generated": [], "skipped": []}
     sem = asyncio.Semaphore(max(1, config.GEN_CONCURRENCY))
-    done = 0
 
-    async def one(i: int) -> None:
-        nonlocal done
+    async def one(i: int) -> str:
         async with sem:
-            try:
-                status = await write_note(course, g.get(i), aligned, force)
-                result["skipped" if status == "skipped" else "generated"].append(i)
-            except Exception as e:  # noqa: BLE001 -- one bad slide shouldn't sink the deck; rerun picks it up
-                result["failed"][i] = str(e) or type(e).__name__
-            done += 1
-            progress(done / len(todo), f"筆記 {done}/{len(todo)}（第 {i} 頁）")
+            return await write_note(course, g.get(i), g.aligned, force)
 
     progress(0.0, f"產生 {len(todo)} 頁筆記")
-    await asyncio.gather(*(one(i) for i in todo))
-    for k in ("generated", "skipped"):
-        result[k].sort()
-    if result["failed"]:
-        pages = "、".join(str(i) for i in sorted(result["failed"]))
-        raise RuntimeError(f"第 {pages} 頁產生失敗：{next(iter(result['failed'].values()))}")
-    return result
+    statuses = await run_slides(todo, one, "產生筆記", progress)
+    return {k: [i for i, s in statuses.items() if s == k] for k in ("generated", "skipped")}
 
 
 def generate_deck(
     course: Course, deck_id: str, progress: Progress | None = None, slides: list[int] | None = None, force: bool = False
 ) -> dict:
-    """Blocking wrapper for job threads. Returns {generated:[i], skipped:[i], failed:{}}; raises if any slide
-    failed, after every other slide has been written."""
+    """Blocking wrapper for job threads. Returns {generated:[i], skipped:[i]}; raises if any slide failed, after
+    every other slide has been written."""
     return asyncio.run(agenerate_deck(course, deck_id, progress, slides, force))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import os
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -13,7 +14,6 @@ import yaml
 
 from ..store import write_text
 
-STATUSES = ("generated", "reviewed", "edited", "skipped")
 _FRONT = re.compile(r"\A---\n(.*?)\n---\n?", re.DOTALL)
 
 
@@ -38,20 +38,22 @@ def read(path: Path) -> tuple[dict, str] | None:
 
 
 def write(path: Path, meta: dict, body: str) -> None:
-    write_text(path, dump(meta, body))
+    with locked(path):
+        write_text(path, dump(meta, body))
 
 
 @contextmanager
 def locked(path: Path) -> Iterator[None]:
-    """Serialize check-then-write on one deck's notes across threads and processes. Every writer, including the
-    API's save, should hold it, so a note the user just edited is never replaced by a generated one."""
+    """Serialize check-then-write on one deck's notes across threads and processes. The lock is flock on the deck's
+    notes folder itself, so no lock file lands among the user's notes. `write` takes it; so does the check in
+    `write_unless_edited`, which is how a note the user just saved is never replaced by a generated one."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path.parent / ".lock", "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing releases the lock
 
 
 def write_unless_edited(path: Path, meta: dict, body: str, force: bool = False) -> bool:
@@ -60,7 +62,7 @@ def write_unless_edited(path: Path, meta: dict, body: str, force: bool = False) 
         current = read(path)
         if not force and current is not None and current[0].get("status") == "edited":
             return False
-        write(path, meta, body)
+        write_text(path, dump(meta, body))
         return True
 
 

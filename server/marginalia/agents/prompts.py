@@ -50,9 +50,9 @@ MODE_RULES = {
 }
 
 
-def _deck_text(course: Course, deck: dict, full: bool) -> str:
+def _deck_text(deck: dict, slides: list[dict], full: bool) -> str:
     lines = [f"## {deck.get('title') or deck['id']}（{deck['id']}，{deck.get('date') or '日期不明'}）"]
-    for s in course.slides(deck["id"]):
+    for s in slides:
         lines.append(f"- 第 {s['index']} 頁：{s.get('title') or ''}")
         if full and (text := (s.get("text") or "").strip()):
             lines.append("  " + " / ".join(ln.strip() for ln in text.splitlines() if ln.strip()))
@@ -63,10 +63,11 @@ def course_outline(course: Course, current_deck: str | None = None, limit: int =
     """Every visible deck's slide text; past `limit`, titles only except the current deck."""
     hidden = set(course.info().get("hiddenDecks", []))
     decks = [d for d in course.manifest()["decks"] if d["id"] not in hidden or d["id"] == current_deck]
-    full = "\n\n".join(_deck_text(course, d, True) for d in decks)
+    slides = {d["id"]: course.slides(d["id"]) for d in decks}
+    full = "\n\n".join(_deck_text(d, slides[d["id"]], True) for d in decks)
     if len(full) <= limit:
         return full
-    out = "\n\n".join(_deck_text(course, d, d["id"] == current_deck) for d in decks)
+    out = "\n\n".join(_deck_text(d, slides[d["id"]], d["id"] == current_deck) for d in decks)
     return out if len(out) <= limit else out[:limit] + "\n（大綱過長，後面截斷）"
 
 
