@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "packageManager": "pnpm@10.17.0",
   "scripts": {
-    "dev": "echo 'apps/web not scaffolded yet (card K3)'",
-    "build": "echo 'static build not wired yet (card K5)'"
+    "dev": "node scripts/dev.mjs",
+    "build": "pnpm --filter @marginalia/web build",
+    "check": "pnpm --filter @marginalia/web check"
   }
 }
