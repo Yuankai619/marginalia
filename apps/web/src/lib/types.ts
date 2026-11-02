@@ -6,7 +6,7 @@ export type Course = {
   subtitle?: string;
   deckCount: number;
   videoCount: number;
-  updatedAt: string;
+  updatedAt?: string;
 };
 
 export type Deck = {
@@ -20,7 +20,7 @@ export type Video = {
   title: string;
   duration: number;
   transcriptStatus?: string;
-  url?: string;
+  source?: string;
 };
 export type Range = { video: string; start: number; end: number };
 export type Slide = {
@@ -33,16 +33,19 @@ export type Slide = {
   note: { status: NoteStatus; updatedAt: string } | null;
 };
 export type CourseDetail = {
-  info: Course;
+  info: Pick<Course, "id" | "title" | "subtitle" | "updatedAt"> & {
+    videoUrls?: Record<string, string>;
+    hiddenDecks?: string[];
+  };
   decks: Deck[];
   videos: Video[];
-  status?: string;
+  status?: string | Record<string, unknown>;
 };
 export type DeckDetail = { deck: Deck; slides: Slide[] };
 export type Note = {
   markdown: string;
   meta: { status: NoteStatus; updatedAt?: string };
-  review: string | null;
+  review: string | Record<string, unknown> | null;
 };
 export type Transcript = { start: number; end: number; text: string };
 export type AlignmentSegment = {
@@ -74,4 +77,44 @@ export type Account = {
   loggedIn: boolean;
   models: { id: string; label: string }[];
   efforts: string[];
+};
+
+export type Region = { x: number; y: number; w: number; h: number };
+export type VideoTime = { video: string; time: number };
+export type ChatContext = {
+  deck: string;
+  slide: number;
+  selection?: { text: string; source: "note" | "transcript" };
+  region?: Region;
+};
+export type ChatRequest = {
+  course: string;
+  chatId: string | null;
+  mode: string;
+  account: string;
+  model: string;
+  effort: string;
+  context: ChatContext;
+  message: string;
+};
+export type ChatEvent = {
+  type: "start" | "text" | "tool" | "done" | "error";
+  chatId?: string;
+  delta?: string;
+  title?: string;
+  detail?: string;
+  message?: string;
+};
+export type ChatMessage = { role: string; content: string };
+export type Chat = {
+  id: string;
+  title: string;
+  mode: string;
+  messages: ChatMessage[];
+};
+export type StaticDeck = DeckDetail & {
+  notes: Record<
+    string,
+    { markdown: string; meta?: Note["meta"]; review?: Note["review"] }
+  >;
 };

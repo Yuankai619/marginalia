@@ -8,41 +8,41 @@ import {
   Pencil,
   Play,
   Search,
-  Send,
   Sun,
   Upload,
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import ReactMarkdown from "react-markdown";
 import {
   Link,
   Navigate,
   Route,
   Routes,
+  useBlocker,
   useNavigate,
   useParams,
 } from "react-router-dom";
-import rehypeKatex from "rehype-katex";
-import rehypeRaw from "rehype-raw";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
 import { toast } from "sonner";
-import { adapter } from "./lib/adapter";
+import { AgentPanel } from "./components/AgentPanel";
+import { Markdown } from "./components/Markdown";
+import { SlideCanvas } from "./components/SlideCanvas";
+import { VideoPlayer } from "./components/VideoPlayer";
+import { adapter, emptyNote } from "./lib/adapter";
+import { subscribeJob } from "./lib/events";
 import type {
   Alignment,
+  ChatContext,
   Course,
   CourseDetail,
   DeckDetail,
   Job,
   Note,
-  Slide,
   Transcript,
+  VideoTime,
 } from "./lib/types";
+import { formatTime as time, videoSource } from "./lib/video";
 
 const data = adapter();
-const time = (seconds: number) =>
-  `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
 const statusLabel = {
   generated: "生成",
   reviewed: "審過",
@@ -85,6 +85,7 @@ function Loading() {
 }
 
 function Courses() {
+  const [query, setQuery] = useState("");
   const [courses, setCourses] = useState<Course[] | null>(null);
   useEffect(() => {
     data
@@ -103,34 +104,56 @@ function Courses() {
             <p>把上課影片、投影片與你的理解，收在同一個閱讀空間。</p>
           </div>
           {data.editable && (
-            <button className="button">
+            <button
+              className="button"
+              onClick={async () => {
+                const title = prompt("課程名稱");
+                if (!title?.trim()) return;
+                try {
+                  await data.createCourse(title.trim());
+                  setCourses(await data.courses());
+                } catch (error) {
+                  toast.error((error as Error).message);
+                }
+              }}
+            >
               <FilePlus2 /> 新增課程
             </button>
           )}
         </div>
         <label className="search">
           <Search />
-          <input placeholder="搜尋課程、簡報或筆記" />
+          <input
+            placeholder="搜尋課程"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
         </label>
         <div className="course-grid">
-          {courses.map((course) => (
-            <Link
-              to={`/c/${course.id}`}
-              className="course-card"
-              key={course.id}
-            >
-              <p className="eyebrow">COURSE / {course.id}</p>
-              <h2>{course.title}</h2>
-              <p>{course.subtitle}</p>
-              <footer>
-                <span>{course.deckCount} 份簡報</span>
-                <span>{course.videoCount} 部影片</span>
-                <span>
-                  {new Date(course.updatedAt).toLocaleDateString("zh-TW")}
-                </span>
-              </footer>
-            </Link>
-          ))}
+          {courses
+            .filter((course) =>
+              `${course.title} ${course.subtitle ?? ""}`.includes(query),
+            )
+            .map((course) => (
+              <Link
+                to={`/c/${course.id}`}
+                className="course-card"
+                key={course.id}
+              >
+                <p className="eyebrow">COURSE / {course.id}</p>
+                <h2>{course.title}</h2>
+                <p>{course.subtitle}</p>
+                <footer>
+                  <span>{course.deckCount} 份簡報</span>
+                  <span>{course.videoCount} 部影片</span>
+                  <span>
+                    {course.updatedAt
+                      ? new Date(course.updatedAt).toLocaleDateString("zh-TW")
+                      : "尚未更新"}
+                  </span>
+                </footer>
+              </Link>
+            ))}
         </div>
       </section>
     </Shell>
@@ -142,11 +165,33 @@ function CourseHome() {
   const [course, setCourse] = useState<CourseDetail | null>(null);
   const [alignment, setAlignment] = useState<Alignment | null>(null);
   const [job, setJob] = useState<Job | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
   const [drop, setDrop] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [selectedDecks, setSelectedDecks] = useState<string[]>([]);
+  const refresh = async () => {
+    const [next, alignment] = await Promise.all([
+      data.course(courseId),
+      data.alignment(courseId),
+    ]);
+    setCourse(next);
+    setAlignment(alignment);
+  };
   useEffect(() => {
     data
       .course(courseId)
-      .then(setCourse)
+      .then((next) => {
+        setCourse(next);
+        setSelectedDecks(
+          next.decks
+            .filter(
+              (deck) =>
+                !deck.hidden && !next.info.hiddenDecks?.includes(deck.id),
+            )
+            .map((deck) => deck.id),
+        );
+      })
       .catch((error: Error) => toast.error(error.message));
     data
       .alignment(courseId)
@@ -154,25 +199,35 @@ function CourseHome() {
       .catch(() => null);
   }, [courseId]);
   useEffect(() => {
-    if (!job || !data.editable || !window.EventSource) return;
-    const events = new EventSource("/api/events");
-    events.addEventListener("job", (event) => {
-      const next = JSON.parse((event as MessageEvent).data) as Job;
-      if (next.id === job.id) setJob(next);
-    });
-    return () => events.close();
-  }, [job]);
-  if (!course) return <Loading />;
-  const run = async () => {
+    if (!jobId) return;
+    return subscribeJob(jobId, data.job, setJob, data.mode === "local");
+  }, [jobId]);
+  const importFiles = async (files?: File[]) => {
+    if (busy) return;
+    setBusy(true);
     try {
-      setJob(
-        await data.createJob(
-          courseId,
-          course.decks.filter((deck) => !deck.hidden).map((deck) => deck.id),
-        ),
-      );
+      if (files?.length) await data.upload(courseId, files);
+      else await data.scan(courseId);
+      await refresh();
+      toast.success(files?.length ? "檔案已匯入" : "掃描完成");
     } catch (error) {
       toast.error((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!course) return <Loading />;
+  const run = async () => {
+    if (starting) return;
+    setStarting(true);
+    try {
+      const { id } = await data.createJob(courseId, selectedDecks);
+      setJob(null);
+      setJobId(id);
+    } catch (error) {
+      toast.error((error as Error).message);
+    } finally {
+      setStarting(false);
     }
   };
   return (
@@ -186,11 +241,24 @@ function CourseHome() {
           <div>
             <h1>{course.info.title}</h1>
             <p>
-              {course.info.subtitle} · {course.status}
+              {course.info.subtitle} ·{" "}
+              {typeof course.status === "string"
+                ? course.status
+                : `${course.decks.length} 份簡報、${course.videos.length} 部影片`}
             </p>
           </div>
           {data.editable && (
-            <button className="button" onClick={run}>
+            <button
+              className="button"
+              onClick={run}
+              disabled={
+                starting ||
+                (jobId !== null && !job) ||
+                !selectedDecks.length ||
+                job?.state === "running" ||
+                job?.state === "queued"
+              }
+            >
               <Bot /> 開始生成
             </button>
           )}
@@ -206,9 +274,8 @@ function CourseHome() {
             onDrop={(event) => {
               event.preventDefault();
               setDrop(false);
-              toast.success(
-                `已準備匯入 ${event.dataTransfer.files.length} 個檔案`,
-              );
+              const files = Array.from(event.dataTransfer.files);
+              if (files.length) void importFiles(files);
             }}
           >
             <Upload />
@@ -216,20 +283,56 @@ function CourseHome() {
               <strong>拖放 pptx、pdf、mp4 或 zip 到這裡</strong>
               <p>也可以將檔案放進本機課程資料夾，再重新掃描。</p>
             </div>
-            <button className="button quiet">重新掃描</button>
+            <label className="button quiet">
+              {busy ? "處理中…" : "選擇檔案"}
+              <input
+                type="file"
+                multiple
+                accept=".pptx,.pdf,.mp4,.zip"
+                disabled={busy}
+                onChange={(event) => {
+                  const files = Array.from(event.target.files ?? []);
+                  if (files.length) void importFiles(files);
+                  event.target.value = "";
+                }}
+                hidden
+              />
+            </label>
+            <button
+              className="button quiet"
+              disabled={busy}
+              onClick={() => void importFiles()}
+            >
+              重新掃描
+            </button>
           </section>
         )}
         {job && <JobProgress job={job} />}
+        {jobId && !job && <p>取得工作進度中…</p>}
         <div className="overview-grid">
           <section>
             <p className="eyebrow">DECKS</p>
             <div className="stack">
               {course.decks.map((deck) => (
                 <article className="deck-row" key={deck.id}>
+                  {data.editable && (
+                    <input
+                      type="checkbox"
+                      aria-label={`生成 ${deck.title}`}
+                      checked={selectedDecks.includes(deck.id)}
+                      onChange={(event) =>
+                        setSelectedDecks((old) =>
+                          event.target.checked
+                            ? [...old, deck.id]
+                            : old.filter((id) => id !== deck.id),
+                        )
+                      }
+                    />
+                  )}
                   <div className="deck-preview">{deck.title.slice(0, 2)}</div>
                   <div>
                     <h3>{deck.title}</h3>
-                    <p>{deck.slideCount} 頁 · 筆記生成中</p>
+                    <p>{deck.slideCount ?? "—"} 頁</p>
                     <p className="muted">
                       對應{" "}
                       {course.videos.map((video) => video.title).join("、")}
@@ -254,7 +357,8 @@ function CourseHome() {
                   <div>
                     <h3>{video.title}</h3>
                     <p>
-                      {time(video.duration)} · 轉錄{video.transcriptStatus}
+                      {time(video.duration)} · 轉錄狀態：
+                      {video.transcriptStatus ?? "尚未提供"}
                     </p>
                   </div>
                 </article>
@@ -298,6 +402,7 @@ function AlignmentView({
   courseId: string;
 }) {
   const [segments, setSegments] = useState(alignment.segments);
+  useEffect(() => setSegments(alignment.segments), [alignment]);
   const edit = async (segment: Alignment["segments"][number]) => {
     const slide = Number(prompt("改成投影片頁碼", String(segment.slide ?? 1)));
     if (!Number.isInteger(slide) || slide < 1) return;
@@ -317,17 +422,20 @@ function AlignmentView({
       <p className="eyebrow">ALIGNMENT</p>
       <h2>影片對齊</h2>
       <p>每個色塊代表影片時間內顯示的投影片；點擊可手動校正頁碼。</p>
-      <div className="timeline">
-        {segments.map((segment) => (
-          <button
-            title={`${time(segment.start)}–${time(segment.end)}`}
-            onClick={() => edit(segment)}
-            key={`${segment.video}-${segment.start}-${segment.end}`}
-            style={{ flex: Math.max(1, segment.end - segment.start) }}
-          >
-            L1 / {segment.slide ?? "—"}
-          </button>
-        ))}
+      <div className="timeline-scroll">
+        <div className="timeline">
+          {segments.map((segment) => (
+            <button
+              title={`${time(segment.start)}–${time(segment.end)}`}
+              disabled={!data.editable || !segment.deck}
+              onClick={() => edit(segment)}
+              key={`${segment.video}-${segment.start}-${segment.end}`}
+              style={{ flex: Math.max(1, segment.end - segment.start) }}
+            >
+              {segment.video} / {segment.slide ?? "—"}
+            </button>
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -339,10 +447,34 @@ function Reader() {
   const slideIndex = Number(slideParam);
   const [deck, setDeck] = useState<DeckDetail | null>(null);
   const [note, setNote] = useState<Note | null>(null);
-  const [transcript, setTranscript] = useState<Transcript[]>([]);
+  const [transcript, setTranscript] = useState<
+    (Transcript & { video: string })[]
+  >([]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  const [playerTime, setPlayerTime] = useState<number | null>(null);
+  const [course, setCourse] = useState<CourseDetail | null>(null);
+  const [playerTime, setPlayerTime] = useState<VideoTime | null>(null);
+  const [context, setContext] = useState<
+    Pick<ChatContext, "region" | "selection">
+  >({});
+  const [saving, setSaving] = useState(false);
+  const dirty = editing && !!note && draft !== note.markdown;
+  const blocker = useBlocker(dirty || saving);
+  useEffect(() => {
+    if (!dirty && !saving) return;
+    const unload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", unload);
+    return () => window.removeEventListener("beforeunload", unload);
+  }, [dirty, saving]);
+  useEffect(() => {
+    data
+      .course(courseId)
+      .then(setCourse)
+      .catch((error: Error) => toast.error(error.message));
+  }, [courseId]);
   const [agentOpen, setAgentOpen] = useState(data.editable);
   useEffect(() => {
     data
@@ -351,54 +483,161 @@ function Reader() {
       .catch((error: Error) => toast.error(error.message));
   }, [courseId, deckId]);
   useEffect(() => {
+    let active = true;
+    setNote(null);
+    setEditing(false);
+    setContext({});
+    setPlayerTime(null);
+    setTranscript([]);
     data
       .note(courseId, deckId, slideIndex)
       .then((value) => {
-        setNote(value);
-        setDraft(value.markdown);
+        if (active) {
+          setNote(value);
+          setDraft(value.markdown);
+        }
       })
-      .catch((error: Error) => toast.error(error.message));
+      .catch((error: Error) => {
+        if (active) toast.error(error.message);
+      });
+    return () => {
+      active = false;
+    };
   }, [courseId, deckId, slideIndex]);
   useEffect(() => {
-    if (!deck) return;
-    const current = deck.slides.find((item) => item.index === slideIndex);
-    const video = current?.ranges[0]?.video;
-    if (video)
-      data
-        .transcript(courseId, video)
-        .then(({ segments }) => setTranscript(segments))
-        .catch(() => setTranscript([]));
+    let active = true;
+    const ranges =
+      deck?.slides.find((item) => item.index === slideIndex)?.ranges ?? [];
+    const videos = [...new Set(ranges.map((range) => range.video))];
+    Promise.all(
+      videos.map(async (video) => {
+        const { segments } = await data.transcript(courseId, video);
+        return segments
+          .filter((part) =>
+            ranges.some(
+              (range) =>
+                range.video === video &&
+                part.end >= range.start &&
+                part.start <= range.end,
+            ),
+          )
+          .map((part) => ({ ...part, video }));
+      }),
+    )
+      .then((parts) => {
+        if (active) setTranscript(parts.flat());
+      })
+      .catch(() => {
+        if (active) setTranscript([]);
+      });
+    return () => {
+      active = false;
+    };
   }, [courseId, deck, slideIndex]);
   useEffect(() => {
     const keyboard = (event: KeyboardEvent) => {
+      if (blocker.state === "blocked") return;
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.key === "s" &&
+        editing &&
+        data.editable
+      ) {
+        event.preventDefault();
+        void save();
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.closest(
+          "input, textarea, select, video, [contenteditable]:not([contenteditable='false'])",
+        ) ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey
+      )
+        return;
+      if (["ArrowLeft", "ArrowRight"].includes(event.key))
+        event.preventDefault();
       if (event.key === "ArrowLeft" && slideIndex > 1)
         navigate(`/c/${courseId}/d/${deckId}/${slideIndex - 1}`);
       if (event.key === "ArrowRight" && deck && slideIndex < deck.slides.length)
         navigate(`/c/${courseId}/d/${deckId}/${slideIndex + 1}`);
-      if ((event.ctrlKey || event.metaKey) && event.key === "s") {
-        event.preventDefault();
-        void save();
-      }
     };
     window.addEventListener("keydown", keyboard);
     return () => window.removeEventListener("keydown", keyboard);
   });
   const save = async () => {
+    if (!editing || saving || !data.editable) return false;
+    setSaving(true);
     try {
       const meta = await data.saveNote(courseId, deckId, slideIndex, draft);
       setNote((old) => (old ? { ...old, markdown: draft, meta } : old));
       setEditing(false);
       toast.success("筆記已儲存");
+      return true;
     } catch (error) {
       toast.error((error as Error).message);
+      return false;
+    } finally {
+      setSaving(false);
     }
   };
-  if (!deck || !note) return <Loading />;
+  if (!deck) return <Loading />;
+  if (!deck.slides.length)
+    return (
+      <Shell>
+        <div className="empty">這份簡報尚無投影片，請先完成轉檔。</div>
+      </Shell>
+    );
+  const currentNote = note ?? emptyNote();
   const current =
     deck.slides.find((item) => item.index === slideIndex) ?? deck.slides[0];
   const go = (index: number) => navigate(`/c/${courseId}/d/${deckId}/${index}`);
+  const playable = (video: string) =>
+    videoSource(course, courseId, video, data.editable);
+  const selectText = (source: "note" | "transcript") => {
+    const text = window.getSelection()?.toString().trim();
+    if (data.editable && text) {
+      setContext({ selection: { text, source } });
+      setAgentOpen(true);
+    }
+  };
   return (
     <Shell>
+      {blocker.state === "blocked" && (
+        <div className="dialog-backdrop">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-label="尚未儲存的筆記"
+            className="unsaved-dialog"
+          >
+            <h2>筆記尚未儲存</h2>
+            <p>離開前要如何處理修改？</p>
+            <button
+              className="button"
+              disabled={saving || !note}
+              onClick={async () => {
+                if (await save()) blocker.proceed();
+              }}
+            >
+              儲存並離開
+            </button>
+            <button
+              className="button quiet"
+              disabled={saving || !note}
+              onClick={() => blocker.proceed()}
+            >
+              放棄修改
+            </button>
+            <button className="button quiet" onClick={() => blocker.reset()}>
+              繼續編輯
+            </button>
+          </section>
+        </div>
+      )}
       <section className={`reader ${agentOpen ? "agent-open" : ""}`}>
         <div className="slide-column">
           <div className="reader-heading">
@@ -411,11 +650,12 @@ function Reader() {
           </div>
           <SlideCanvas
             slide={current}
-            onRegion={() =>
-              toast("已帶入投影片圈選範圍", {
-                description: "可在 Agent 面板繼續提問。",
-              })
-            }
+            selectable={data.editable}
+            key={`${deckId}-${slideIndex}`}
+            onRegion={(region) => {
+              setContext({ region });
+              setAgentOpen(true);
+            }}
           />
           <div className="thumbnails">
             {deck.slides.map((item) => (
@@ -424,6 +664,9 @@ function Reader() {
                 onClick={() => go(item.index)}
                 key={item.index}
               >
+                {item.thumb && (
+                  <img src={item.thumb} alt={item.title} loading="lazy" />
+                )}
                 <span>{item.index}</span>
                 <small>{item.title}</small>
               </button>
@@ -454,14 +697,15 @@ function Reader() {
               </p>
               <h2>{current.title}</h2>
             </div>
-            <span className={`status ${note.meta.status}`}>
-              {statusLabel[note.meta.status]}
+            <span className={`status ${currentNote.meta.status}`}>
+              {statusLabel[currentNote.meta.status]}
             </span>
           </div>
           <div className="note-tools">
             {data.editable && (
               <button
                 className="button quiet"
+                disabled={saving || !note}
                 onClick={() => (editing ? void save() : setEditing(true))}
               >
                 <Pencil /> {editing ? "儲存" : "編輯"}
@@ -471,47 +715,72 @@ function Reader() {
               <button
                 className="icon-button"
                 onClick={() => {
-                  setDraft(note.markdown);
+                  if (dirty && !confirm("放棄尚未儲存的修改？")) return;
+                  setDraft(currentNote.markdown);
                   setEditing(false);
                 }}
+                disabled={saving}
                 aria-label="取消編輯"
               >
                 <X />
               </button>
             )}
           </div>
-          {editing ? (
+          {!note ? (
+            <Loading />
+          ) : editing ? (
             <textarea
               className="editor"
+              disabled={saving}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
             />
           ) : (
-            <Markdown markdown={note.markdown} onTime={setPlayerTime} />
+            <div onMouseUp={() => selectText("note")}>
+              <Markdown
+                markdown={currentNote.markdown}
+                onTime={setPlayerTime}
+                canPlay={(video) => !!playable(video)}
+              />
+            </div>
           )}
           <section className="sources">
             <p className="eyebrow">VIDEO RANGES</p>
             {current.ranges.map((range) => (
               <button
-                onClick={() => setPlayerTime(range.start)}
+                disabled={!playable(range.video)}
+                onClick={() =>
+                  setPlayerTime({ video: range.video, time: range.start })
+                }
                 key={`${range.video}-${range.start}`}
               >
                 {range.video} · {time(range.start)}–{time(range.end)}
               </button>
             ))}
           </section>
-          {note.review && (
+          {currentNote.review && (
             <details className="review" open>
               <summary>審稿意見</summary>
-              <p>{note.review}</p>
+              <p>
+                {typeof currentNote.review === "string"
+                  ? currentNote.review
+                  : JSON.stringify(currentNote.review, null, 2)}
+              </p>
             </details>
           )}
-          <section className="transcript">
+          <section
+            className="transcript"
+            onMouseUp={() => selectText("transcript")}
+          >
             <p className="eyebrow">TRANSCRIPT</p>
             {transcript.map((part) => (
               <button
-                key={`${part.start}-${part.text}`}
-                onClick={() => setPlayerTime(part.start)}
+                key={`${part.video}-${part.start}-${part.text}`}
+                disabled={!playable(part.video)}
+                onClick={() => {
+                  if (!window.getSelection()?.toString())
+                    setPlayerTime({ video: part.video, time: part.start });
+                }}
               >
                 <time>{time(part.start)}</time>
                 {part.text}
@@ -521,7 +790,14 @@ function Reader() {
         </aside>
         {data.editable && agentOpen && (
           <AgentPanel
-            context={`目前在：${deck.deck.title} 第 ${slideIndex} 頁`}
+            key={courseId}
+            data={data}
+            courseId={courseId}
+            label={`目前在：${deck.deck.title} 第 ${slideIndex} 頁`}
+            context={{ deck: deckId, slide: slideIndex, ...context }}
+            onClearContext={() => setContext({})}
+            onTime={setPlayerTime}
+            canPlay={(video) => !!playable(video)}
           />
         )}
         {data.editable && (
@@ -533,260 +809,18 @@ function Reader() {
             {agentOpen ? <PanelRightClose /> : <Bot />}
           </button>
         )}
-        {playerTime !== null && (
-          <VideoPlayer time={playerTime} onClose={() => setPlayerTime(null)} />
+        {playerTime && playable(playerTime.video) && (
+          <VideoPlayer
+            captions={transcript.filter(
+              (part) => part.video === playerTime.video,
+            )}
+            target={playerTime}
+            src={playable(playerTime.video) ?? ""}
+            onClose={() => setPlayerTime(null)}
+          />
         )}
       </section>
     </Shell>
-  );
-}
-
-function SlideCanvas({
-  slide,
-  onRegion,
-}: {
-  slide: Slide;
-  onRegion: () => void;
-}) {
-  const [origin, setOrigin] = useState<{ x: number; y: number } | null>(null);
-  const [region, setRegion] = useState<{
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-  } | null>(null);
-  const point = (event: React.PointerEvent) => {
-    const bounds = event.currentTarget.getBoundingClientRect();
-    return {
-      x: ((event.clientX - bounds.left) / bounds.width) * 100,
-      y: ((event.clientY - bounds.top) / bounds.height) * 100,
-    };
-  };
-  return (
-    <div
-      className="slide-canvas"
-      onPointerDown={(event) => {
-        event.currentTarget.setPointerCapture(event.pointerId);
-        setOrigin(point(event));
-        setRegion(null);
-      }}
-      onPointerMove={(event) => {
-        if (!origin) return;
-        const next = point(event);
-        setRegion({
-          x: Math.min(origin.x, next.x),
-          y: Math.min(origin.y, next.y),
-          w: Math.abs(next.x - origin.x),
-          h: Math.abs(next.y - origin.y),
-        });
-      }}
-      onPointerUp={() => {
-        if (region && region.w > 3 && region.h > 3) onRegion();
-        setOrigin(null);
-      }}
-    >
-      <div className="slide-content">
-        <p className="eyebrow">OPERATING SYSTEMS · L1</p>
-        <h1>{slide.title}</h1>
-        <p>{slide.text}</p>
-        <div className="slide-diagram">
-          <span>使用者</span>
-          <i>應用程式</i>
-          <b>作業系統</b>
-          <i>硬體</i>
-        </div>
-        <small>拖曳圈選區域後可詢問 Agent</small>
-      </div>
-      {region && (
-        <i
-          className="selection"
-          style={{
-            left: `${region.x}%`,
-            top: `${region.y}%`,
-            width: `${region.w}%`,
-            height: `${region.h}%`,
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-type HtmlNode = {
-  type: string;
-  tagName?: string;
-  properties?: Record<string, unknown>;
-  children?: HtmlNode[];
-};
-
-const safeTags = new Set([
-  "a",
-  "blockquote",
-  "br",
-  "code",
-  "del",
-  "details",
-  "em",
-  "h1",
-  "h2",
-  "h3",
-  "h4",
-  "h5",
-  "h6",
-  "hr",
-  "li",
-  "ol",
-  "p",
-  "pre",
-  "strong",
-  "summary",
-  "table",
-  "tbody",
-  "td",
-  "th",
-  "thead",
-  "tr",
-  "ul",
-]);
-const removeWithChildren = new Set(["iframe", "script", "style", "svg"]);
-
-const sanitizeNoteHtml = () => (tree: HtmlNode) => {
-  const clean = (node: HtmlNode): HtmlNode[] => {
-    if (node.type === "comment") return [];
-    if (node.children) node.children = node.children.flatMap(clean);
-    if (node.type !== "element") return [node];
-    if (removeWithChildren.has(node.tagName ?? "")) return [];
-    if (!safeTags.has(node.tagName ?? "")) return node.children ?? [];
-    if (node.tagName === "a" && typeof node.properties?.href === "string") {
-      const href = node.properties.href;
-      node.properties = /^(https?:|mailto:|video:|#|\/)/i.test(href)
-        ? { href }
-        : {};
-    } else {
-      node.properties = {};
-    }
-    return [node];
-  };
-  tree.children = tree.children?.flatMap(clean);
-};
-
-function Markdown({
-  markdown,
-  onTime,
-}: {
-  markdown: string;
-  onTime: (time: number) => void;
-}) {
-  return (
-    <div className="markdown">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeRaw, sanitizeNoteHtml, rehypeKatex]}
-        components={{
-          a: ({ href, children }) => {
-            const found = href?.match(/^video:([^?]+)\?t=(\d+(?:\.\d+)?)$/);
-            return found ? (
-              <button
-                className="timestamp"
-                onClick={() => onTime(Number(found[2]))}
-              >
-                {children}
-              </button>
-            ) : (
-              <a href={href}>{children}</a>
-            );
-          },
-        }}
-      >
-        {markdown}
-      </ReactMarkdown>
-    </div>
-  );
-}
-
-function AgentPanel({ context }: { context: string }) {
-  const [message, setMessage] = useState("");
-  const [mode, setMode] = useState("qa");
-  const [messages, setMessages] = useState<string[]>([]);
-  const send = () => {
-    if (!message.trim()) return;
-    setMessages((all) => [
-      ...all,
-      `你：${message}`,
-      "Agent：我會根據這一頁的投影片、筆記與逐字稿來回答。開發預覽模式未連接模型。",
-    ]);
-    setMessage("");
-  };
-  return (
-    <aside className="agent">
-      <div className="agent-head">
-        <div>
-          <p className="eyebrow">STUDY AGENT</p>
-          <strong>本機 Agent</strong>
-        </div>
-        <span className="online">已登入</span>
-      </div>
-      <p className="context">{context}</p>
-      <div className="modes">
-        {[
-          ["qa", "問答"],
-          ["interview", "口試"],
-          ["review", "審稿"],
-        ].map(([id, label]) => (
-          <button
-            key={id}
-            className={mode === id ? "active" : ""}
-            onClick={() => setMode(id)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-      <div className="messages">
-        {messages.length ? (
-          messages.map((item, index) => <p key={index}>{item}</p>)
-        ) : (
-          <p>圈選投影片、筆記或逐字稿文字，讓我以目前頁面為脈絡協助你複習。</p>
-        )}
-      </div>
-      <div className="chat-input">
-        <textarea
-          value={message}
-          onChange={(event) => setMessage(event.target.value)}
-          placeholder="問這一頁的概念…"
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              send();
-            }
-          }}
-        />
-        <button className="icon-button" onClick={send} aria-label="傳送">
-          <Send />
-        </button>
-      </div>
-    </aside>
-  );
-}
-
-function VideoPlayer({
-  time: at,
-  onClose,
-}: {
-  time: number;
-  onClose: () => void;
-}) {
-  return (
-    <aside className="player">
-      <button className="icon-button" onClick={onClose} aria-label="關閉播放器">
-        <X />
-      </button>
-      <div>
-        <Play fill="currentColor" />
-        <p>影片播放器</p>
-        <strong>跳至 {time(at)}</strong>
-      </div>
-    </aside>
   );
 }
 

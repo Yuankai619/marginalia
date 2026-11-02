@@ -1,18 +1,25 @@
+import { readEventStream } from "./events";
 import type {
   Account,
   Alignment,
+  Chat,
+  ChatEvent,
+  ChatRequest,
   Course,
   CourseDetail,
   DeckDetail,
   Job,
   Note,
   Slide,
+  StaticDeck,
   Transcript,
 } from "./types";
 
 export type DataAdapter = {
   readonly editable: boolean;
+  readonly mode: "local" | "static" | "mock";
   courses(): Promise<Course[]>;
+  createCourse(title: string): Promise<unknown>;
   course(courseId: string): Promise<CourseDetail>;
   deck(courseId: string, deckId: string): Promise<DeckDetail>;
   note(courseId: string, deckId: string, slide: number): Promise<Note>;
@@ -31,14 +38,27 @@ export type DataAdapter = {
     courseId: string,
     segment: Alignment["segments"][number],
   ): Promise<Alignment>;
-  createJob(courseId: string, decks: string[]): Promise<Job>;
+  upload(courseId: string, files: File[]): Promise<unknown>;
+  scan(courseId: string): Promise<unknown>;
+  createJob(courseId: string, decks: string[]): Promise<{ id: string }>;
+  job(id: string): Promise<Job>;
   accounts(): Promise<Account[]>;
+  chat(
+    request: ChatRequest,
+    onEvent: (event: ChatEvent) => void,
+    signal: AbortSignal,
+  ): Promise<void>;
+  chats(courseId: string): Promise<Omit<Chat, "messages">[]>;
+  conversation(courseId: string, chatId: string): Promise<Chat>;
 };
 
 const call = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     ...init,
+    headers:
+      init?.body instanceof FormData
+        ? undefined
+        : { "Content-Type": "application/json" },
   });
   if (!response.ok)
     throw new Error(
@@ -46,81 +66,140 @@ const call = async <T>(path: string, init?: RequestInit): Promise<T> => {
     );
   return response.json() as Promise<T>;
 };
-
 const pathSegment = (value: string) => encodeURIComponent(value);
+const coursePath = (c: string) => `/api/courses/${pathSegment(c)}`;
+const notePath = (c: string, d: string, i: number) =>
+  `${coursePath(c)}/decks/${pathSegment(d)}/notes/${i}`;
+const readOnly = async (): Promise<never> => {
+  throw new Error("靜態閱讀模式無法修改資料");
+};
+export const emptyNote = (): Note => ({
+  markdown: "尚無筆記",
+  meta: { status: "skipped" },
+  review: null,
+});
 
 const local: DataAdapter = {
   editable: true,
+  mode: "local",
   courses: () => call("/api/courses"),
-  course: (c) => call(`/api/courses/${pathSegment(c)}`),
-  deck: (c, d) =>
-    call(`/api/courses/${pathSegment(c)}/decks/${pathSegment(d)}`),
-  note: (c, d, i) =>
-    call(`/api/courses/${pathSegment(c)}/decks/${pathSegment(d)}/notes/${i}`),
-  saveNote: (c, d, i, markdown) =>
-    call(`/api/courses/${pathSegment(c)}/decks/${pathSegment(d)}/notes/${i}`, {
+  createCourse: (title) =>
+    call("/api/courses", { method: "POST", body: JSON.stringify({ title }) }),
+  course: (c) => call(coursePath(c)),
+  deck: (c, d) => call(`${coursePath(c)}/decks/${pathSegment(d)}`),
+  note: async (c, d, i) => {
+    const response = await fetch(notePath(c, d, i));
+    if (response.status === 404) return emptyNote();
+    if (!response.ok) throw new Error("讀取筆記失敗");
+    return response.json();
+  },
+  saveNote: async (c, d, i, markdown) => {
+    const { meta } = await call<{ meta: Note["meta"] }>(notePath(c, d, i), {
       method: "PUT",
       body: JSON.stringify({ markdown }),
-    }),
+    });
+    return meta;
+  },
   transcript: (c, v) =>
-    call(`/api/courses/${pathSegment(c)}/videos/${pathSegment(v)}/transcript`),
-  alignment: (c) => call(`/api/courses/${pathSegment(c)}/alignment`),
+    call(`${coursePath(c)}/videos/${pathSegment(v)}/transcript`),
+  alignment: (c) => call(`${coursePath(c)}/alignment`),
   updateSegment: (c, segment) =>
-    call(`/api/courses/${pathSegment(c)}/alignment/segments`, {
+    call(`${coursePath(c)}/alignment/segments`, {
       method: "PUT",
       body: JSON.stringify(segment),
     }),
-  createJob: async (c, decks) => {
-    const { id } = await call<{ id: string }>(
-      `/api/courses/${pathSegment(c)}/jobs`,
-      {
-        method: "POST",
-        body: JSON.stringify({ kind: "pipeline", decks }),
-      },
-    );
-    return {
-      id,
-      course: c,
-      kind: "pipeline",
-      state: "queued",
-      progress: 0,
-      message: "等待開始",
-      steps: [],
-    };
+  upload: async (c, files) => {
+    const body = new FormData();
+    for (const file of files) body.append("files[]", file);
+    let response = await fetch(`${coursePath(c)}/upload`, {
+      method: "POST",
+      body,
+    });
+    if (response.status === 422) {
+      const error = await response
+        .clone()
+        .json()
+        .catch(() => null);
+      // PR #4 originally names the multipart field `files`; retry only pre-write validation failures.
+      if (
+        Array.isArray(error?.detail) &&
+        error.detail.some(
+          (item: { type?: string; loc?: string[] }) =>
+            item.type === "missing" && item.loc?.join(".") === "body.files",
+        )
+      ) {
+        const legacy = new FormData();
+        for (const file of files) legacy.append("files", file);
+        response = await fetch(`${coursePath(c)}/upload`, {
+          method: "POST",
+          body: legacy,
+        });
+      }
+    }
+    if (!response.ok) throw new Error("匯入檔案失敗，請確認檔案格式並重試");
+    return response.json();
   },
+  scan: (c) => call(`${coursePath(c)}/scan`, { method: "POST" }),
+  createJob: (c, decks) =>
+    call(`${coursePath(c)}/jobs`, {
+      method: "POST",
+      body: JSON.stringify({ kind: "pipeline", decks }),
+    }),
+  job: (id) => call(`/api/jobs/${pathSegment(id)}`),
   accounts: () => call("/api/agents/accounts"),
+  chat: async (request, onEvent, signal) => {
+    const response = await fetch("/api/agents/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      signal,
+    });
+    if (!response.ok)
+      throw new Error(
+        (await response.json().catch(() => null))?.detail || "無法連接 Agent",
+      );
+    await readEventStream(response, onEvent);
+  },
+  chats: (c) => call(`${coursePath(c)}/chats`),
+  conversation: (c, id) => call(`${coursePath(c)}/chats/${pathSegment(id)}`),
 };
 
 const staticAdapter: DataAdapter = {
+  ...local,
   editable: false,
+  mode: "static",
   courses: () => call("/data/courses.json"),
   course: (c) => call(`/data/${pathSegment(c)}/course.json`),
   deck: (c, d) => call(`/data/${pathSegment(c)}/decks/${pathSegment(d)}.json`),
   note: async (c, d, i) => {
-    const deck = await call<{ slides: { index: number; note: Note | null }[] }>(
+    const deck = await call<StaticDeck>(
       `/data/${pathSegment(c)}/decks/${pathSegment(d)}.json`,
     );
-    return (
-      deck.slides.find((slide) => slide.index === i)?.note ?? {
-        markdown: "尚無筆記",
-        meta: { status: "skipped" },
-        review: null,
-      }
-    );
-  },
-  saveNote: async () => {
-    throw new Error("靜態閱讀模式無法編輯筆記");
+    const note = deck.notes?.[i];
+    if (!note) return emptyNote();
+    return {
+      markdown: note.markdown,
+      meta: note.meta ??
+        deck.slides.find((slide) => slide.index === i)?.note ?? {
+          status: "skipped",
+        },
+      review: note.review ?? null,
+    };
   },
   transcript: (c, v) =>
     call(`/data/${pathSegment(c)}/transcripts/${pathSegment(v)}.json`),
   alignment: async () => ({ videos: {}, segments: [] }),
-  updateSegment: async () => {
-    throw new Error("靜態閱讀模式無法修改對齊");
-  },
-  createJob: async () => {
-    throw new Error("靜態閱讀模式無法生成");
-  },
+  createCourse: readOnly,
+  saveNote: readOnly,
+  updateSegment: readOnly,
+  upload: readOnly,
+  scan: readOnly,
+  createJob: readOnly,
+  job: readOnly,
+  chat: readOnly,
   accounts: async () => [],
+  chats: async () => [],
+  conversation: readOnly,
 };
 
 const mockCourse: Course = {
@@ -160,7 +239,18 @@ const mockSlides: Slide[] = Array.from({ length: 12 }, (_, index) => ({
   },
 }));
 const mock: DataAdapter = {
+  ...local,
   editable: true,
+  mode: "mock",
+  createCourse: async () => ({}),
+  upload: async () => ({ saved: [], manifest: { decks: [], videos: [] } }),
+  scan: async () => ({ decks: [], videos: [] }),
+  chats: async () => [],
+  chat: async (_request, onEvent) => {
+    onEvent({ type: "start", chatId: "mock" });
+    onEvent({ type: "text", delta: "模擬模式：這是示範回覆。" });
+    onEvent({ type: "done", chatId: "mock" });
+  },
   courses: async () => [mockCourse],
   course: async () => ({
     info: mockCourse,
@@ -216,13 +306,14 @@ const mock: DataAdapter = {
     videos: { os20260916: {} },
     segments: [segment],
   }),
-  createJob: async (course, decks) => ({
-    id: crypto.randomUUID(),
-    course,
+  createJob: async () => ({ id: "mock-job" }),
+  job: async (id) => ({
+    id,
+    course: mockCourse.id,
     kind: "pipeline",
-    state: "queued",
-    progress: 0,
-    message: `準備生成 ${decks.length} 份簡報`,
+    state: "done",
+    progress: 1,
+    message: "模擬工作完成",
     steps: [],
   }),
   accounts: async () => [
@@ -239,5 +330,5 @@ const mock: DataAdapter = {
 
 export const adapter = (): DataAdapter => {
   if (import.meta.env.VITE_MARGINALIA_MODE === "static") return staticAdapter;
-  return import.meta.env.VITE_MARGINALIA_MOCK === "true" ? mock : local;
+  return import.meta.env.VITE_MARGINALIA_MODE === "mock" ? mock : local;
 };
