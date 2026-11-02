@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+      - name: Install Poppler
+        run: sudo apt-get update && sudo apt-get install --yes poppler-utils
+      - name: Install dependencies
+        working-directory: server
+        run: uv sync --frozen
+      - name: Lint
+        working-directory: server
+        run: uv run ruff check .
+        continue-on-error: true # Remove after K1 fixes the existing Ruff violations.
+      - name: Test
+        working-directory: server
+        run: |
+          set +e
+          uv run pytest -q
+          status=$?
+          if [ "$status" -eq 5 ]; then
+            echo "尚無測試，略過。"
+            exit 0
+          fi
+          exit "$status"
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - id: web
+        name: Check web app
+        run: |
+          if [ -f apps/web/package.json ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "apps/web/package.json 不存在，略過前端 CI。"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: pnpm/action-setup@v4
+        if: steps.web.outputs.exists == 'true'
+      - uses: actions/setup-node@v5
+        if: steps.web.outputs.exists == 'true'
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        if: steps.web.outputs.exists == 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Check
+        if: steps.web.outputs.exists == 'true'
+        run: pnpm check
+      - name: Build
+        if: steps.web.outputs.exists == 'true'
+        run: pnpm build
