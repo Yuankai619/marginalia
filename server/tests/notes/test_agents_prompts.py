@@ -22,12 +22,38 @@ def test_course_id_string_and_no_slide(course):
     assert "學生目前在看的投影片" not in s
 
 
-def test_review_mode_includes_style_and_previous_findings(course):
-    write_json(course.review_path("d1", 1), {"findings": [{"severity": "high", "problem": "時間點錯", "quote": "q"}]})
+def test_review_mode_includes_style_and_matching_findings(course):
     s = prompts.build_system(course, "review", "d1", 1)
-    assert "筆記寫作規範" in s and "AI 味" in s
-    assert "[high] 時間點錯（q）" in s
-    assert "（還沒有筆記）" in s
+    assert "筆記寫作規範" in s and "AI 味" in s and "（還沒有筆記）" in s
+
+    notefile.write(course.note_path("d1", 1), {"slide": 1, "status": "reviewed"}, "修訂後的版本")
+    record = {
+        "findings": [{"severity": "high", "problem": "時間點錯", "quote": "q"}],
+        "unresolved": [{"severity": "medium", "problem": "還沒修好", "quote": "r"}],
+        "reviewedHash": notefile.digest("原本的版本"),
+        "noteHash": notefile.digest("修訂後的版本"),
+    }
+    write_json(course.review_path("d1", 1), record)
+    s = prompts.build_system(course, "review", "d1", 1)
+    assert "還沒修好" in s and "時間點錯" not in s  # findings were about the old text
+
+    notefile.write(course.note_path("d1", 1), {"slide": 1, "status": "edited"}, "原本的版本")
+    assert "時間點錯" in prompts.build_system(course, "review", "d1", 1)
+    notefile.write(course.note_path("d1", 1), {"slide": 1, "status": "edited"}, "第三版")
+    assert "自動審稿先前的意見" not in prompts.build_system(course, "review", "d1", 1)
+
+
+def test_whole_prompt_stays_inside_the_budget(course):
+    notefile.write(course.note_path("d1", 1), {"slide": 1, "status": "edited"}, "長" * 1_000_000)
+    slides = course.slides("d1")
+    slides[0]["speakerNotes"] = "備" * 500_000
+    write_json(course.deck_dir("d1") / "slides.json", slides)
+    write_json(course.review_path("d1", 1), {"reviewedHash": notefile.digest("長" * 1_000_000), "findings": [
+        {"severity": "low", "problem": "p" * 600, "quote": "q" * 600} for _ in range(200)
+    ]})  # fmt: skip
+    s = prompts.build_system(course, "review", "d1", 1, selection={"text": "選" * 100_000, "source": "note"})
+    assert len(s) <= prompts.PROMPT_CHARS
+    assert "以下截斷" in s and "整門課的投影片大綱" in s
 
 
 def test_selection_and_region(course):

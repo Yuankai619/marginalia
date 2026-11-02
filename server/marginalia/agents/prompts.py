@@ -9,11 +9,14 @@ from __future__ import annotations
 
 from ..notes import notefile
 from ..notes.generate import STYLE
-from ..notes.material import Gatherer, render
+from ..notes.material import NOTE_CHARS, Gatherer, clip, render
 from ..store import Course, read_json
 
 MODES = ("qa", "interview", "review")
-OUTLINE_CHARS = 60_000  # whole-course slide text above this falls back to titles + the current deck in full
+PROMPT_CHARS = 120_000  # whole system prompt; the course outline gets whatever the other sections leave
+MIN_OUTLINE_CHARS = 4_000
+SELECTION_CHARS = 4_000
+FINDINGS_CHARS = 6_000
 
 ROLE = """你是這門課的助教，在學生讀投影片和筆記時陪他學。學生是第一次學作業系統。
 - 用繁體中文（台灣用語）回答，技術名詞保留英文。
@@ -59,7 +62,7 @@ def _deck_text(deck: dict, slides: list[dict], full: bool) -> str:
     return "\n".join(lines)
 
 
-def course_outline(course: Course, current_deck: str | None = None, limit: int = OUTLINE_CHARS) -> str:
+def course_outline(course: Course, current_deck: str | None = None, limit: int = PROMPT_CHARS) -> str:
     """Every visible deck's slide text; past `limit`, titles only except the current deck."""
     hidden = set(course.info().get("hiddenDecks", []))
     decks = [d for d in course.manifest()["decks"] if d["id"] not in hidden or d["id"] == current_deck]
@@ -82,6 +85,16 @@ def _region_text(region: dict) -> str | None:
     )
 
 
+def _review_findings(course: Course, deck_id: str, index: int, body: str) -> list[dict]:
+    """Findings that are about the note as it is now: all of them if the review saw this exact text, only what was
+    left unresolved if this is the text the review wrote, none if the note changed since."""
+    rv = read_json(course.review_path(deck_id, index)) or {}
+    h = notefile.digest(body)
+    if rv.get("reviewedHash") == h:
+        return rv.get("findings", [])
+    return rv.get("unresolved", []) if rv.get("noteHash") == h else []
+
+
 def _slide_context(course: Course, deck_id: str, index: int, with_review: bool) -> str:
     m = Gatherer(course, deck_id).get(index)
     parts = [
@@ -91,13 +104,12 @@ def _slide_context(course: Course, deck_id: str, index: int, with_review: bool) 
     ]
     note = notefile.read(course.note_path(deck_id, index))
     if note:
-        parts.append(f"## 這頁目前的筆記（status: {note[0].get('status', '?')}）\n\n{note[1]}")
+        parts.append(f"## 這頁目前的筆記（status: {note[0].get('status', '?')}）\n\n{clip(note[1], NOTE_CHARS)}")
     else:
         parts.append("## 這頁目前的筆記\n（還沒有筆記）")
-    if with_review and (rv := read_json(course.review_path(deck_id, index))):
-        lines = [f"- [{f.get('severity')}] {f.get('problem')}（{f.get('quote')}）" for f in rv.get("findings", [])]
-        if lines:
-            parts.append("## 自動審稿先前的意見\n" + "\n".join(lines))
+    if with_review and note and (findings := _review_findings(course, deck_id, index, note[1])):
+        lines = [f"- [{f.get('severity')}] {f.get('problem')}（{f.get('quote')}）" for f in findings]
+        parts.append(clip("## 自動審稿先前的意見\n" + "\n".join(lines), FINDINGS_CHARS))
     return "\n\n".join(parts)
 
 
@@ -116,19 +128,17 @@ def build_system(
     if deck is not None and course.deck(deck) is None:
         raise KeyError(deck)
     info = course.info()
-    parts = [
-        ROLE,
-        MODE_RULES[mode],
-        f"# 課程：{info['title']}" + (f"（{info['subtitle']}）" if info.get("subtitle") else ""),
-        f"# 整門課的投影片大綱\n\n{course_outline(course, deck)}",
-    ]
+    parts = [ROLE, MODE_RULES[mode], f"# 課程：{info['title']}" + (f"（{info['subtitle']}）" if info.get("subtitle") else "")]
     if mode == "review":
         parts.append(f"# 筆記寫作規範\n\n{STYLE}")
     if deck is not None and slide is not None:
         parts.append(_slide_context(course, deck, slide, with_review=mode == "review"))
     if selection and (text := str(selection.get("text") or "").strip()):
         source = {"note": "筆記", "slide": "投影片", "transcript": "逐字稿"}.get(str(selection.get("source")), "畫面")
-        parts.append(f"# 學生選取的文字（來自{source}）\n\n> " + text[:4000].replace("\n", "\n> "))
+        parts.append(f"# 學生選取的文字（來自{source}）\n\n> " + text[:SELECTION_CHARS].replace("\n", "\n> "))
     if isinstance(region, dict) and (text := _region_text(region)):
         parts.append(f"# 學生框選的區域\n\n{text}")
+    # every other section is capped; the outline takes what is left of the budget
+    room = max(MIN_OUTLINE_CHARS, PROMPT_CHARS - sum(len(p) + 2 for p in parts) - 40)
+    parts.insert(3, f"# 整門課的投影片大綱\n\n{course_outline(course, deck, room)}")
     return "\n\n".join(parts)

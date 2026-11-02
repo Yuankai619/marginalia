@@ -41,8 +41,8 @@ def normalize_links(body: str) -> str:
     def fix(m: re.Match) -> str:
         if not SECONDS.fullmatch(m.group(3)):
             return m.group(0)
-        t = float(m.group(3))
-        return f"[{clock(t)}](video:{m.group(2)}?t={t:.0f})"
+        t = round(float(m.group(3)))
+        return f"[{clock(t)}](video:{m.group(2)}?t={t})"
 
     return LINK.sub(fix, body)
 
@@ -65,7 +65,7 @@ def check_links(body: str, m: Material) -> list[dict]:
         elif not any(r["video"] == video and r["start"] - PAD <= sec <= r["end"] + PAD for r in m.ranges):
             out.append(_finding("high", quote, f"{clock(sec)} 不在這頁出現在影片上的時間範圍內。", "改成這頁出現的時間範圍內。"))
         if label != clock(sec):
-            out.append(_finding("low", quote, f"標籤 {label} 和 t={sec:.0f}（{clock(sec)}）不一致。", f"標籤改成 {clock(sec)}。"))
+            out.append(_finding("low", quote, f"標籤 {label} 和 t={round(sec)}（{clock(sec)}）不一致。", f"標籤改成 {clock(sec)}。"))
     return out
 
 

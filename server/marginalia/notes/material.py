@@ -11,10 +11,18 @@ from ..store import Course, read_json, slide_name
 MIN_RANGE = 6.0  # on-screen stretches shorter than this are usually alignment flicker
 PAD = 5.0  # seconds of transcript kept around each on-screen range; teachers often start a point just before flipping
 MAX_TRANSCRIPT_CHARS = 30_000  # ~50 minutes of speech; a slide that stays up longer gets its tail cut
+# per-section caps so one slide's material stays near 55k chars however big the deck or the note gets
+SLIDE_TEXT_CHARS = 8_000
+OUTLINE_CHARS = 6_000
+NOTE_CHARS = 20_000
+
+
+def clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else f"{text[:limit]}\n（以下截斷，原文共 {len(text)} 字）"
 
 
 def clock(seconds: float) -> str:
-    s = int(seconds)
+    s = round(seconds)  # the same rounding as every t= we write, so label and seek target agree
     h, m, s = s // 3600, s // 60 % 60, s % 60
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
@@ -111,7 +119,7 @@ class Gatherer:
 def transcript_text(m: Material) -> str:
     out, size = [], 0
     for ln in m.lines:
-        row = f"[{ln['video']} t={ln['start']:.0f} {clock(ln['start'])}] {ln['text']}"
+        row = f"[{ln['video']} t={round(ln['start'])} {clock(ln['start'])}] {ln['text']}"
         size += len(row) + 1
         if size > MAX_TRANSCRIPT_CHARS:
             out.append("（逐字稿過長，後面截斷）")
@@ -125,13 +133,13 @@ def render(m: Material) -> str:
     s = m.slide
     parts = [
         f"# 簡報：{m.deck.get('title', m.deck['id'])}（{m.deck['id']}）",
-        f"## 整份簡報大綱\n{m.outline}",
+        f"## 整份簡報大綱\n{clip(m.outline, OUTLINE_CHARS)}",
         f"## 本頁：第 {m.index} 頁「{s.get('title') or ''}」",
         f"前一頁：{m.prev_title or '（無）'}；後一頁：{m.next_title or '（無）'}",
-        f"### 投影片文字\n{(s.get('text') or '').strip() or '（無文字）'}",
+        f"### 投影片文字\n{clip((s.get('text') or '').strip(), SLIDE_TEXT_CHARS) or '（無文字）'}",
     ]
     if (s.get("speakerNotes") or "").strip():
-        parts.append(f"### 講者備註\n{s['speakerNotes'].strip()}")
+        parts.append(f"### 講者備註\n{clip(s['speakerNotes'].strip(), SLIDE_TEXT_CHARS)}")
     if m.ranges:
         spans = "、".join(f"{r['video']} {clock(r['start'])}–{clock(r['end'])}（t={r['start']:.0f}–{r['end']:.0f}）" for r in m.ranges)
         parts.append(f"### 這頁出現在影片的時間\n{spans}")

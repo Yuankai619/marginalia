@@ -21,7 +21,8 @@ def calls(monkeypatch):
 
 def test_clock():
     assert clock(64) == "01:04"
-    assert clock(3725.9) == "1:02:05"
+    assert clock(3725.9) == "1:02:06"
+    assert clock(59.6) == "01:00" and clock(3599.8) == "1:00:00" and clock(60.4) == "01:00"
 
 
 def test_material_has_ranges_and_timed_transcript(course):
@@ -45,7 +46,7 @@ def test_partial_transcript_is_flagged(course):
 
 def test_generate_writes_notes_and_skips_unshown_slide(course, calls):
     out = generate.generate_deck(course, "d1")
-    assert out == {"generated": [1, 2], "skipped": [3]}
+    assert out == {"generated": [1, 2], "skipped": [3], "kept": []}
     assert len(calls) == 2  # slide 3 was never on screen: no model call
 
     meta, body = notefile.read(course.note_path("d1", 2))
@@ -125,6 +126,47 @@ def test_short_flash_goes_to_the_writer_not_auto_skip(course, calls):
     assert len(calls) == 1 and "unrelated chat after class" in calls[0].prompt
 
 
+@pytest.mark.parametrize(
+    ("meta", "text"),
+    [({}, "手寫的筆記，沒有 frontmatter"), ({"slide": 1, "status": "generated"}, "另一個工作剛寫好的版本")],
+)
+def test_note_written_by_someone_else_during_generation_wins(course, monkeypatch, meta, text):
+    path = course.note_path("d1", 1)
+
+    async def someone_writes_meanwhile(call):
+        if meta:
+            notefile.write(path, meta, text)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        return "模型的版本"
+
+    monkeypatch.setattr(claude, "complete", someone_writes_meanwhile)
+    assert generate.generate_deck(course, "d1", slides=[1])["kept"] == [1]
+    assert notefile.read(path)[1] == text
+
+
+def test_partial_transcript_notes_are_rewritten_once_it_is_complete(course, calls):
+    from marginalia.store import read_json, write_json
+
+    full = course.video_dir("v1") / "transcript.json"
+
+    saved = read_json(full)
+    full.unlink()
+    write_json(course.video_dir("v1") / "transcript.partial.json", {"segments": saved["segments"][:1]})
+    generate.generate_deck(course, "d1")
+    assert notefile.read(course.note_path("d1", 1))[0]["partial"] is True
+    assert "partial" not in notefile.read(course.note_path("d1", 3))[0]  # never on screen: final either way
+
+    edited = course.note_path("d1", 2)
+    notefile.write(edited, {**notefile.read(edited)[0], "status": "edited"}, "我改過的")
+    write_json(full, saved)
+    calls.clear()
+    assert generate.generate_deck(course, "d1")["generated"] == [1]  # 2 is the user's now, 3 was complete
+    assert "partial" not in notefile.read(course.note_path("d1", 1))[0]
+    assert notefile.read(edited)[1] == "我改過的"
+
+
 def test_edited_during_generation_is_kept(course, monkeypatch):
     path = course.note_path("d1", 1)
 
@@ -140,4 +182,4 @@ def test_edited_during_generation_is_kept(course, monkeypatch):
 def test_note_without_status_counts_as_edited(course, calls):
     course.note_path("d1", 1).parent.mkdir(parents=True)
     course.note_path("d1", 1).write_text("手寫的，沒有 frontmatter")
-    assert generate.generate_deck(course, "d1", slides=[1]) == {"generated": [], "skipped": []}
+    assert generate.generate_deck(course, "d1", slides=[1]) == {"generated": [], "skipped": [], "kept": []}

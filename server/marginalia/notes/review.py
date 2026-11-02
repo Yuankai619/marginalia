@@ -20,10 +20,12 @@ from . import notefile, rules
 from .batch import Progress, run_slides, select
 from .generate import STYLE, meta, parse_output
 from .generate import SYSTEM as WRITER_SYSTEM
-from .material import Gatherer, Material, render
+from .material import NOTE_CHARS, Gatherer, Material, clip, render
 
 SEVERITIES = ("high", "medium", "low")
-FIELD_CHARS = 1000  # a finding is a sentence or two; anything longer is a reviewer gone wrong
+FIELD_CHARS = 600  # a finding is a sentence or two; anything longer is a reviewer gone wrong
+MAX_FINDINGS = 30  # per reviewer, keeps the revision prompt inside its budget
+MAX_REVISIONS = 2  # a second round only when the local rules still fail after the first
 SYSTEM = f"你是作業系統課講義的審稿人。學生會拿這份筆記搭配投影片和上課影片讀。以下是筆記的寫作規範：\n\n{STYLE}"
 
 OUTPUT = """## 輸出格式
@@ -76,11 +78,22 @@ def parse_findings(text: str, reviewer: str) -> list[dict]:
             continue
         sev = f.get("severity") if f.get("severity") in SEVERITIES else "medium"
         out.append({"reviewer": reviewer, "severity": sev, **{k: str(f.get(k) or "")[:FIELD_CHARS] for k in ("quote", "problem", "fix")}})
-    return out
+    return out[:MAX_FINDINGS]
 
 
 def reviewer_prompt(m: Material, body: str, task: str) -> str:
-    return f"{render(m)}\n\n## 要審的筆記（第 {m.index} 頁）\n\n{body}\n\n## 你的審稿任務\n\n{task}\n\n{OUTPUT}"
+    return f"{render(m)}\n\n## 要審的筆記（第 {m.index} 頁）\n\n{clip(body, NOTE_CHARS)}\n\n## 你的審稿任務\n\n{task}\n\n{OUTPUT}"
+
+
+def revise_prompt(m: Material, body: str, findings: list[dict]) -> str:
+    return (
+        f"{render(m)}\n\n## 目前的筆記\n\n{clip(body, NOTE_CHARS)}\n\n## 審稿意見\n\n{findings_text(findings)}\n\n"
+        f"{REVISE.format(index=m.index)}"
+    )
+
+
+def blocking(findings: list[dict]) -> list[dict]:
+    return [f for f in findings if f["severity"] != "low"]
 
 
 def findings_text(findings: list[dict]) -> str:
@@ -114,49 +127,76 @@ class Reviewer:
             out = await codex.complete(prompt, codex_home=self.codex_home, images=m.images)
         return parse_findings(out, "codex-correctness")
 
-    async def review_slide(self, index: int, force: bool = False) -> dict | None:
-        """Review one note, revise it if needed. Returns the review record, or None when there is nothing to review."""
-        path = self.course.note_path(self.deck_id, index)
-        note = notefile.read(path)
-        if note is None or note[0].get("status") == "skipped":
-            return None
-        front, body = note
-        m = self.g.get(index)
-
+    async def _findings(self, m: Material, body: str) -> tuple[list[dict], dict[str, str]]:
         jobs = {name: self._review(name, m, body) for name in REVIEWERS}
         if self.codex_home:
             jobs["codex-correctness"] = self._codex(m, body)
         results = await asyncio.gather(*jobs.values(), return_exceptions=True)
-        findings = rules.check(body, m)
-        errors = {}
+        findings, errors = rules.check(body, m), {}
         for name, r in zip(jobs, results, strict=True):
             if isinstance(r, BaseException):
                 errors[name] = str(r) or type(r).__name__
             else:
                 findings.extend(r)
-        if all(name in errors for name in REVIEWERS):
-            raise RuntimeError(f"第 {index} 頁審稿全部失敗：{next(iter(errors.values()))}")
         findings.sort(key=lambda f: SEVERITIES.index(f["severity"]))
+        return findings, errors
 
-        revised, status = False, "reviewed"
-        editable = force or front.get("status", "edited") != "edited"
-        if editable and any(f["severity"] != "low" for f in findings):
-            prompt = (
-                f"{render(m)}\n\n## 目前的筆記\n\n{body}\n\n## 審稿意見\n\n{findings_text(findings)}\n\n"
-                f"{REVISE.format(index=index)}"
-            )
-            new_status, new_body = parse_output(await self._claude(prompt, WRITER_SYSTEM, m, config.WRITER_MODEL))
-            if new_body:
-                body, revised = new_body, True
-                status = "skipped" if new_status == "skipped" else status
+    async def _revise(self, m: Material, body: str, findings: list[dict]) -> tuple[str, str, list[dict]]:
+        """Revise until the local rules pass, at most MAX_REVISIONS rounds. Returns (status, body, unresolved):
+        status stays "generated" while anything high/medium is left, so a later run picks the note up again."""
+        current, todo = body, findings
+        for _ in range(MAX_REVISIONS):
+            reply = await self._claude(revise_prompt(m, current, todo), WRITER_SYSTEM, m, config.WRITER_MODEL)
+            status, new = parse_output(reply)
+            if not new:
+                break
+            if status == "skipped":
+                return "skipped", new, []
+            current = new
+            todo = blocking(rules.check(current, m))
+            if not todo:
+                return "reviewed", current, []
+        return "generated", current, todo if current != body else blocking(findings)
 
-        record = {"findings": findings, "revised": revised, "reviewedAt": notefile.now()}
+    async def review_slide(self, index: int, force: bool = False) -> tuple[str, dict] | None:
+        """Review one note and revise it if needed. Returns (outcome, record) or None when there is nothing to review.
+        Outcomes: "reviewed"; "unresolved" (revised but problems remain, left as generated); "kept" (the user's note:
+        findings only); "conflict" (the note changed while we worked: nothing written)."""
+        path = self.course.note_path(self.deck_id, index)
+        base = notefile.version(path)
+        note = notefile.read(path)
+        if note is None or note[0].get("status") == "skipped":
+            return None
+        front, body = note
+        m = self.g.get(index)
+        findings, errors = await self._findings(m, body)
+        record = {"findings": findings, "reviewedHash": notefile.digest(body), "reviewedAt": notefile.now()}
         if errors:
             record["errors"] = errors
+
+        missing = [name for name in REVIEWERS if name in errors]
+        if missing:  # an incomplete review must not pass as done: keep the note as is so a rerun retries
+            if notefile.version(path) == base:
+                write_json(self.course.review_path(self.deck_id, index), {**record, "noteHash": record["reviewedHash"]})
+            raise RuntimeError(f"第 {index} 頁 {'、'.join(missing)} 審稿失敗：{errors[missing[0]]}")
+
+        if not force and notefile.protected(front):
+            outcome, status, final, unresolved = "kept", None, body, []
+        elif blocking(findings):
+            status, final, unresolved = await self._revise(m, body, findings)
+            outcome = "unresolved" if unresolved else "reviewed"
+        else:
+            outcome, status, final, unresolved = "reviewed", "reviewed", body, []
+        record.update(revised=final != body, noteHash=notefile.digest(final), unresolved=unresolved)
+
+        if status is not None:
+            new_meta = {**front, **meta(m, status, bool(front.get("partial")))}
+            if not notefile.commit(path, new_meta, final, base, force):
+                return "conflict", record
+        elif notefile.version(path) != base:
+            return "conflict", record
         write_json(self.course.review_path(self.deck_id, index), record)
-        if editable:
-            notefile.write_unless_edited(path, {**front, **meta(m, status)}, body, force)
-        return record
+        return outcome, record
 
 
 async def areview_deck(
@@ -170,19 +210,23 @@ async def areview_deck(
     progress = progress or (lambda f, msg: None)
     rv = Reviewer(course, deck_id, codex_home)
     # resuming reviews generated notes; listed slides are reviewed again (edited ones get findings, not rewrites)
-    todo = select(
-        course, deck_id, len(rv.g.slides), slides,
-        lambda s: s == "generated" or (s in ("reviewed", "edited") and (slides is not None or force)),
-    )  # fmt: skip
+    def keep(front: dict | None) -> bool:
+        status = front and front.get("status", "edited")
+        return status == "generated" or (status in ("reviewed", "edited") and (slides is not None or force))
+
+    todo = select(course, deck_id, len(rv.g.slides), slides, keep)
+    result: dict[str, list[int]] = {k: [] for k in ("reviewed", "revised", "unresolved", "kept", "conflict")}
     if not todo:
         progress(1.0, "沒有需要審稿的筆記")
-        return {"reviewed": [], "revised": []}
+        return result
     progress(0.0, f"審稿 {len(todo)} 頁（{'Claude＋Codex' if rv.codex_home else 'Claude'}）")
-    records = await run_slides(todo, lambda i: rv.review_slide(i, force), "審稿", progress)
-    return {
-        "reviewed": [i for i, r in records.items() if r is not None],
-        "revised": [i for i, r in records.items() if r and r["revised"]],
-    }
+    for i, done in (await run_slides(todo, lambda i: rv.review_slide(i, force), "審稿", progress)).items():
+        if done is not None:
+            outcome, record = done
+            result[outcome].append(i)
+            if record["revised"] and outcome != "conflict":
+                result["revised"].append(i)
+    return result
 
 
 def review_deck(
@@ -193,7 +237,8 @@ def review_deck(
     force: bool = False,
     codex_home: Path | None = None,
 ) -> dict:
-    """Blocking wrapper for job threads. Returns {reviewed:[i], revised:[i]}. `codex_home` adds Codex as a second
+    """Blocking wrapper for job threads. Returns {reviewed, revised, unresolved, kept, conflict: [i]} (see
+    Reviewer.review_slide for the outcomes). `codex_home` adds Codex as a second
     correctness reviewer when it is logged in there; otherwise Codex is skipped. Raises if any slide failed, after
     the others are done."""
     return asyncio.run(areview_deck(course, deck_id, progress, slides, force, codex_home))

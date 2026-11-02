@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import re
 from collections.abc import Iterator
@@ -37,6 +38,24 @@ def read(path: Path) -> tuple[dict, str] | None:
         return None
 
 
+def protected(meta: dict) -> bool:
+    """Whether a note belongs to the user. A note without a status counts as edited: hand-written files are safe."""
+    return meta.get("status", "edited") == "edited"
+
+
+def version(path: Path) -> str | None:
+    """Hash of the file as it is on disk now, or None when it doesn't exist."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+def digest(body: str) -> str:
+    """Hash of a note body, used to tie a review record to the text it is about."""
+    return hashlib.sha256(body.strip().encode()).hexdigest()[:16]
+
+
 def write(path: Path, meta: dict, body: str) -> None:
     with locked(path):
         write_text(path, dump(meta, body))
@@ -45,8 +64,8 @@ def write(path: Path, meta: dict, body: str) -> None:
 @contextmanager
 def locked(path: Path) -> Iterator[None]:
     """Serialize check-then-write on one deck's notes across threads and processes. The lock is flock on the deck's
-    notes folder itself, so no lock file lands among the user's notes. `write` takes it; so does the check in
-    `write_unless_edited`, which is how a note the user just saved is never replaced by a generated one."""
+    notes folder itself, so no lock file lands among the user's notes. Held only around disk access, never across a
+    model call."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path.parent, os.O_RDONLY)
     try:
@@ -56,11 +75,15 @@ def locked(path: Path) -> Iterator[None]:
         os.close(fd)  # closing releases the lock
 
 
-def write_unless_edited(path: Path, meta: dict, body: str, force: bool = False) -> bool:
-    """Write the note unless the user has edited it (re-checked under the lock). Returns whether it was written."""
+def commit(path: Path, meta: dict, body: str, expected: str | None, force: bool = False) -> bool:
+    """Compare-and-swap. Write only if the file is still the version this job started from (`expected`, None for
+    absent) and, unless `force`, not the user's. Anything else wrote it meanwhile (the user, another job): their
+    version wins and this returns False."""
     with locked(path):
+        if version(path) != expected:
+            return False
         current = read(path)
-        if not force and current is not None and current[0].get("status") == "edited":
+        if not force and current is not None and protected(current[0]):
             return False
         write_text(path, dump(meta, body))
         return True

@@ -63,18 +63,27 @@ def prompt(m: Material) -> str:
     return f"{render(m)}\n\n{TASK.format(index=m.index, links=LINKS_RULE if m.lines else NO_LINKS_RULE)}"
 
 
-def meta(m: Material, status: str) -> dict:
-    return {
+def meta(m: Material, status: str, partial: bool = False) -> dict:
+    out = {
         "slide": m.index,
         "title": m.slide.get("title") or f"Slide {m.index}",
         "status": status,
         "sources": notefile.sources(m.ranges),
         "updatedAt": notefile.now(),
     }
+    if partial:
+        out["partial"] = True  # written before transcript/alignment were complete; the next run rewrites it
+    return out
 
 
 async def write_note(course: Course, m: Material, aligned: bool, force: bool = False) -> str:
-    """Write one slide's note and return its status."""
+    """Write one slide's note and return its status, or "kept" when the note changed meanwhile and was left alone."""
+    path = course.note_path(m.deck["id"], m.index)
+    base = notefile.version(path)  # compare-and-swap: only replace the exact version we started from
+    current = notefile.read(path)
+    if current is not None and not force and notefile.protected(current[0]):
+        return "kept"
+    partial = False
     if aligned and not m.ranges:
         status, body = "skipped", NOT_SHOWN
     else:
@@ -82,9 +91,20 @@ async def write_note(course: Course, m: Material, aligned: bool, force: bool = F
         status, body = parse_output(await claude.complete(call))
         if not body:
             raise RuntimeError(f"第 {m.index} 頁模型沒有回傳內容")
-    # re-checked under the lock: the user may have edited the note while the model was busy
-    notefile.write_unless_edited(course.note_path(m.deck["id"], m.index), meta(m, status), body, force)
-    return status
+        partial = m.partial or not aligned
+    return status if notefile.commit(path, meta(m, status, partial), body, base, force) else "kept"
+
+
+def _wanted(slides: list[int] | None, force: bool):
+    """Resuming fills missing notes and rewrites ones written from partial material; listed slides are rewritten;
+    the user's notes only with force."""
+
+    def keep(front: dict | None) -> bool:
+        if front is None or force:
+            return True
+        return not notefile.protected(front) and (slides is not None or bool(front.get("partial")))
+
+    return keep
 
 
 async def agenerate_deck(
@@ -92,11 +112,10 @@ async def agenerate_deck(
 ) -> dict:
     progress = progress or (lambda f, msg: None)
     g = Gatherer(course, deck_id)
-    # resuming fills missing notes; listed slides are rewritten unless edited; force rewrites everything listed
-    todo = select(course, deck_id, len(g.slides), slides, lambda s: s is None or force or (slides is not None and s != "edited"))
+    todo = select(course, deck_id, len(g.slides), slides, _wanted(slides, force))
     if not todo:
         progress(1.0, "沒有需要產生的筆記")
-        return {"generated": [], "skipped": []}
+        return {"generated": [], "skipped": [], "kept": []}
     sem = asyncio.Semaphore(max(1, config.GEN_CONCURRENCY))
 
     async def one(i: int) -> str:
@@ -105,12 +124,12 @@ async def agenerate_deck(
 
     progress(0.0, f"產生 {len(todo)} 頁筆記")
     statuses = await run_slides(todo, one, "產生筆記", progress)
-    return {k: [i for i, s in statuses.items() if s == k] for k in ("generated", "skipped")}
+    return {k: [i for i, s in statuses.items() if s == k] for k in ("generated", "skipped", "kept")}
 
 
 def generate_deck(
     course: Course, deck_id: str, progress: Progress | None = None, slides: list[int] | None = None, force: bool = False
 ) -> dict:
-    """Blocking wrapper for job threads. Returns {generated:[i], skipped:[i]}; raises if any slide failed, after
-    every other slide has been written."""
+    """Blocking wrapper for job threads. Returns {generated:[i], skipped:[i], kept:[i]} (kept: changed by someone
+    else while the model ran, left alone); raises if any slide failed, after every other slide has been written."""
     return asyncio.run(agenerate_deck(course, deck_id, progress, slides, force))

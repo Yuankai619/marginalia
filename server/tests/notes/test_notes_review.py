@@ -18,7 +18,7 @@ def written(course, monkeypatch):
     return course
 
 
-def fake_models(monkeypatch, revised="kernel 管理 CPU、記憶體和 I/O [00:30](video:v1?t=30)。"):
+def fake_models(monkeypatch, revised="kernel 管理 CPU、記憶體和 I/O。"):
     seen = []
 
     async def fake(call):
@@ -39,17 +39,18 @@ def fake_models(monkeypatch, revised="kernel 管理 CPU、記憶體和 I/O [00:3
 def test_review_writes_findings_and_revises(written, monkeypatch):
     seen = fake_models(monkeypatch)
     out = review.review_deck(written, "d1")
-    assert out == {"reviewed": [1, 2], "revised": [1, 2]}  # slide 3 is skipped: nothing to review
+    assert out["reviewed"] == [1, 2] and out["revised"] == [1, 2]  # slide 3 is skipped: nothing to review
 
     rec = read_json(written.review_path("d1", 1))
     by = {f["reviewer"] for f in rec["findings"]}
     assert by == {"rules", "correctness", "style"}
     assert rec["findings"][0]["severity"] == "high"
     assert next(f for f in rec["findings"] if f["reviewer"] == "style")["severity"] == "medium"
-    assert rec["revised"] is True and "errors" not in rec
+    assert rec["revised"] is True and "errors" not in rec and rec["unresolved"] == []
 
     meta, body = notefile.read(written.note_path("d1", 1))
     assert meta["status"] == "reviewed" and body.startswith("kernel 管理 CPU")
+    assert rec["noteHash"] == notefile.digest(body) != rec["reviewedHash"]
     assert len(seen) == 2 * 4  # three reviewers + one revision per slide
 
     assert review.review_deck(written, "d1")["reviewed"] == []  # resume: already reviewed
@@ -61,7 +62,7 @@ def test_edited_note_gets_findings_but_is_not_rewritten(written, monkeypatch):
     meta, _ = notefile.read(path)
     notefile.write(path, {**meta, "status": "edited"}, "我的版本，總之")
     out = review.review_deck(written, "d1", slides=[1])
-    assert out["reviewed"] == [1] and out["revised"] == []
+    assert out["kept"] == [1] and out["revised"] == []
     assert notefile.read(path)[1].strip() == "我的版本，總之"
     assert read_json(written.review_path("d1", 1))["findings"]
 
@@ -76,8 +77,13 @@ def test_one_reviewer_failing_is_recorded(written, monkeypatch):
         return await inner(call)
 
     monkeypatch.setattr(claude, "complete", flaky)
-    review.review_deck(written, "d1", slides=[2])
+    with pytest.raises(RuntimeError, match="第 1、2 頁審稿失敗：第 1 頁 coverage 審稿失敗：rate limited"):
+        review.review_deck(written, "d1")
     assert read_json(written.review_path("d1", 2))["errors"] == {"coverage": "rate limited"}
+    assert notefile.read(written.note_path("d1", 2))[0]["status"] == "generated"  # not passed off as reviewed
+
+    monkeypatch.setattr(claude, "complete", inner)  # the outage is over: a plain rerun retries those slides
+    assert review.review_deck(written, "d1")["reviewed"] == [1, 2]
 
 
 def test_all_reviewers_failing_raises(written, monkeypatch):
@@ -88,6 +94,54 @@ def test_all_reviewers_failing_raises(written, monkeypatch):
     with pytest.raises(RuntimeError, match="審稿失敗"):
         review.review_deck(written, "d1", slides=[1])
     assert notefile.read(written.note_path("d1", 1))[0]["status"] == "generated"
+
+
+def test_revision_that_breaks_the_rules_is_not_marked_reviewed(written, monkeypatch):
+    seen = fake_models(monkeypatch, revised="錯誤連結 [00:01](video:v9?t=1)")
+    out = review.review_deck(written, "d1", slides=[1])
+    assert out["unresolved"] == [1] and out["reviewed"] == []
+    assert sum("## 審稿意見" in c.prompt for c in seen) == review.MAX_REVISIONS  # bounded retries
+    meta, body = notefile.read(written.note_path("d1", 1))
+    assert meta["status"] == "generated" and "v9" in body
+    rec = read_json(written.review_path("d1", 1))
+    assert rec["unresolved"][0]["problem"] == "影片 v9 不是這頁出現的影片。"
+
+
+def test_second_revision_round_fixes_rule_problems(written, monkeypatch):
+    replies = iter(["錯誤連結 [00:01](video:v9?t=1)", "kernel 管理 CPU [00:30](video:v1?t=30)。"])
+    fake_models(monkeypatch)
+    inner = claude.complete
+
+    async def fake(call):
+        return next(replies) if "## 審稿意見" in call.prompt else await inner(call)
+
+    monkeypatch.setattr(claude, "complete", fake)
+    assert review.review_deck(written, "d1", slides=[1])["reviewed"] == [1]
+    assert notefile.read(written.note_path("d1", 1))[0]["status"] == "reviewed"
+
+
+def test_empty_revision_is_unresolved(written, monkeypatch):
+    fake_models(monkeypatch, revised="   ")
+    assert review.review_deck(written, "d1", slides=[1])["unresolved"] == [1]
+    meta, body = notefile.read(written.note_path("d1", 1))
+    assert meta["status"] == "generated" and body.startswith("總之")
+
+
+def test_note_changed_during_review_is_left_alone(written, monkeypatch):
+    fake_models(monkeypatch)
+    inner = claude.complete
+    path = written.note_path("d1", 1)
+
+    async def racing(call):
+        if "## 審稿意見" in call.prompt:  # another job rewrites the note while the reviser runs
+            notefile.write(path, {"slide": 1, "status": "generated"}, "另一個工作的版本")
+        return await inner(call)
+
+    monkeypatch.setattr(claude, "complete", racing)
+    out = review.review_deck(written, "d1", slides=[1])
+    assert out["conflict"] == [1] and out["revised"] == []
+    assert notefile.read(path)[1] == "另一個工作的版本"
+    assert read_json(written.review_path("d1", 1)) is None  # findings about a stale text are not stored
 
 
 def test_codex_second_opinion(written, monkeypatch, tmp_path):
@@ -139,6 +193,10 @@ def test_links_without_transcript_use_the_on_screen_range(course):
 
 
 def test_normalize_links():
+    assert rules.normalize_links("[x](video:v1?t=60.4)") == "[01:00](video:v1?t=60)"
+    assert rules.normalize_links("[x](video:v1?t=60.6)") == "[01:01](video:v1?t=61)"
+    assert rules.normalize_links("[x](video:v1?t=59.8)") == "[01:00](video:v1?t=60)"
+    assert rules.normalize_links("[x](video:v1?t=3599.8)") == "[1:00:00](video:v1?t=3600)"
     assert rules.normalize_links("[x](video:v1?t=nan)") == "[x](video:v1?t=nan)"
     assert rules.normalize_links("[0:00](video:v1?t=3725.4)") == "[1:02:05](video:v1?t=3725)"
     assert rules.normalize_links("[a](video:v1?t=x)") == "[a](video:v1?t=x)"
