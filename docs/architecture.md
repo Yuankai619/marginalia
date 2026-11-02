@@ -158,6 +158,22 @@ survive re-alignment.
 
 All JSON. Errors: `{"detail": "<繁中訊息>"}` with a 4xx/5xx status.
 
+有副作用的請求會驗證 `Origin`；預設允許 `http://localhost:5173`、
+`http://127.0.0.1:5173`，並始終允許同源及未附 `Origin` 的本機 CLI 請求。
+可在啟動時用 `MARGINALIA_ALLOWED_ORIGINS` 取代預設清單，以逗號分隔完整來源
+（含協定、主機與必要的連接埠，不含路徑、結尾斜線或萬用字元）；項目前後空白與空項目會忽略。
+設定為空字串時，僅允許同源及未附 `Origin` 的請求。變更設定後須重啟開發伺服器。
+
+透過 Tailscale 存取時，例如：
+
+```sh
+MARGINALIA_ALLOWED_ORIGINS="http://localhost:5173,http://127.0.0.1:5173,http://100.81.100.96:5173" pnpm dev --host
+```
+
+Vite 仍將 `/api`、`/files` 代理至 `127.0.0.1:8765`；後端維持只監聽 loopback。
+API 的 TrustedHost 會額外允許設定清單內的主機名稱，支援 Vite 保留原始 Host 的代理方式；
+Origin 比對仍須符合清單中的協定、主機與連接埠，或與請求同源。
+
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
 | GET | `/api/health` | | `{mode:"local", version}` |

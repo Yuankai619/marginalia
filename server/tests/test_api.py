@@ -346,3 +346,95 @@ def test_slow_account_checks_do_not_block_other_requests(tmp_path, monkeypatch):
 
     asyncio.run(run("/api/agents/accounts"))
     asyncio.run(run("/api/agents/chat"))
+
+
+def test_configured_origins_allow_tailscale_proxy_and_reject_other_sources(
+    tmp_path, monkeypatch
+):
+    make_course(tmp_path, monkeypatch)
+    monkeypatch.setenv(
+        "MARGINALIA_ALLOWED_ORIGINS",
+        " http://100.81.100.96:5173, ,http://localhost:5173, ",
+    )
+    client = TestClient(create_app(JobRunner()))
+    for origin in ("http://100.81.100.96:5173", "http://localhost:5173"):
+        response = client.post(
+            "/api/courses/demo/scan",
+            headers={"Host": "100.81.100.96:5173", "Origin": origin},
+        )
+        assert response.status_code == 200
+    for origin in (
+        "http://100.81.100.96:5174",
+        "https://100.81.100.96:5173",
+        "http://100.81.100.97:5173",
+        "http://100.81.100.96.evil.example:5173",
+        "http://127.0.0.1:5173",
+        "null",
+    ):
+        assert (
+            client.post(
+                "/api/courses/demo/scan", headers={"Origin": origin}
+            ).status_code
+            == 403
+        )
+    assert (
+        client.get("/api/health", headers={"Host": "100.81.100.97:5173"}).status_code
+        == 400
+    )
+    assert (
+        client.get("/api/health", headers={"Host": "attacker.example"}).status_code
+        == 400
+    )
+
+
+def test_empty_origin_setting_keeps_same_origin_and_cli_requests(tmp_path, monkeypatch):
+    make_course(tmp_path, monkeypatch)
+    monkeypatch.setenv("MARGINALIA_ALLOWED_ORIGINS", " , ")
+    client = TestClient(create_app(JobRunner()))
+    for origin in ("http://localhost:5173", "http://127.0.0.1:5173"):
+        assert (
+            client.post(
+                "/api/courses/demo/scan", headers={"Origin": origin}
+            ).status_code
+            == 403
+        )
+    assert (
+        client.post(
+            "/api/courses/demo/scan", headers={"Origin": "http://testserver"}
+        ).status_code
+        == 200
+    )
+    assert client.post("/api/courses/demo/scan").status_code == 200
+
+
+def test_default_origins_reject_unconfigured_tailscale(tmp_path, monkeypatch):
+    make_course(tmp_path, monkeypatch)
+    monkeypatch.delenv("MARGINALIA_ALLOWED_ORIGINS", raising=False)
+    client = TestClient(create_app(JobRunner()))
+    assert (
+        client.post(
+            "/api/courses/demo/scan", headers={"Origin": "http://100.81.100.96:5173"}
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get("/api/health", headers={"Host": "100.81.100.96:5173"}).status_code
+        == 400
+    )
+
+
+def test_invalid_origin_configuration_fails_at_startup(monkeypatch):
+    import pytest
+
+    for value in (
+        "*",
+        "null",
+        "http://*.example",
+        "http://example/path",
+        "http://example/",
+        "http://example:bad",
+        "http://user:password@example",
+    ):
+        monkeypatch.setenv("MARGINALIA_ALLOWED_ORIGINS", value)
+        with pytest.raises(ValueError, match="MARGINALIA_ALLOWED_ORIGINS"):
+            create_app(JobRunner())

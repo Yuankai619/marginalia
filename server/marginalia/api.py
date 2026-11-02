@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
+import os
 import re
 from contextlib import aclosing, asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 import yaml
 from anyio import CancelScope
@@ -185,20 +187,48 @@ class ChatResponse(StreamingResponse):
 
 def create_app(job_runner: JobRunner = runner) -> FastAPI:
     app = FastAPI(title="Marginalia local API", lifespan=_lifespan)
-    app.add_middleware(
-        TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"]
-    )
+    allowed_origins = {
+        value.strip()
+        for value in os.environ.get(
+            "MARGINALIA_ALLOWED_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173",
+        ).split(",")
+        if value.strip()
+    }
+    allowed_hosts = {"127.0.0.1", "localhost", "testserver"}
+    for origin in allowed_origins:
+        try:
+            parsed = urlsplit(origin)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or "*" in parsed.netloc
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("invalid origin")
+            # Validate the port even though TrustedHost checks only the hostname.
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError(
+                "MARGINALIA_ALLOWED_ORIGINS 必須是逗號分隔的完整來源網址"
+            ) from exc
+        allowed_hosts.add(parsed.hostname)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(allowed_hosts))
 
     @app.middleware("http")
     async def check_origin(request: Request, call_next):
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             origin = request.headers.get("origin")
-            allowed = {
-                "http://localhost:5173",
-                "http://127.0.0.1:5173",
-                str(request.base_url).rstrip("/"),
-            }
-            if origin is not None and origin not in allowed:
+            same_origin = str(request.base_url).rstrip("/")
+            if (
+                origin is not None
+                and origin != same_origin
+                and origin not in allowed_origins
+            ):
                 return JSONResponse({"detail": "不允許此請求來源"}, status_code=403)
         return await call_next(request)
 
