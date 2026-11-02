@@ -65,6 +65,35 @@ async function fixture(page, isStatic=false) {
  });
  return {requests,job,jobReads:()=>jobReads};
 }
+async function unicodeVideoLinks(browser, base, isStatic) {
+ const page=await browser.newPage();
+ try {
+  await fixture(page,isStatic);
+  const unicodeMarkdown='[中文影片](video:課堂一?t=12) [編碼影片](video:%E8%AA%B2%E5%A0%82%E4%B8%80?t=24) [ASCII影片](video:video-b?t=12) [未知影片](video:不存在?t=12) [拒絕腳本](javascript:alert(1)) [拒絕資料](data:text/html,test)';
+  const unicodeCourse={...course,info:{...info,videoUrls:{'課堂一':'https://example.com/public-videos/chinese.mp4','video-b':'https://example.com/public-videos/ascii.mp4'}},videos:[...course.videos,{id:'課堂一',source:'materials/chinese.mp4',title:'中文影片',duration:100}]};
+  if(isStatic){
+   await page.route('**/data/fixture/course.json',route=>json(route,unicodeCourse));
+   await page.route('**/data/fixture/decks/deck.json',route=>json(route,{...deck,notes:{'1':{markdown:unicodeMarkdown,meta}}}));
+  }else{
+   await page.route('**/api/courses/fixture',route=>json(route,unicodeCourse));
+   await page.route('**/api/courses/fixture/decks/deck/notes/1',route=>json(route,{markdown:unicodeMarkdown,meta,review:null}));
+  }
+  await page.route('**/files/fixture/**',route=>route.abort());
+  await page.route('https://example.com/public-videos/**',route=>route.abort());
+  await page.goto(base+'/c/fixture/d/deck/1');
+  await page.getByRole('button',{name:'中文影片',exact:true}).waitFor();
+  assert.equal(await page.locator('.note-column .timestamp').count(),3);
+  for(const [label,video] of [['中文影片','chinese'],['編碼影片','chinese'],['ASCII影片','ascii']]){
+   await page.getByRole('button',{name:label,exact:true}).click();
+   const expected=isStatic?`https://example.com/public-videos/${video}.mp4`:`/files/fixture/materials/${video==='ascii'?'test':video}.mp4`;
+   assert.equal(await page.locator('video').getAttribute('src'),expected);
+   await page.getByRole('button',{name:'關閉播放器'}).click();
+  }
+  assert.equal(await page.locator('a[href^="javascript:"],a[href^="data:"]').count(),0);
+  assert.equal(await page.getByRole('button',{name:'未知影片',exact:true}).count(),0);
+  console.log(`PASS Unicode literal/encoded timestamps and manifest lookup in ${isStatic?'static':'local'} mode`);
+ }finally{await page.close();}
+}
 async function run() {
  const browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/usr/bin/google-chrome',args:['--no-sandbox']});
  const errors=[];
@@ -155,6 +184,8 @@ async function run() {
   await staticPage.reload();await staticPage.locator('.note-column .markdown').waitFor();
   assert.equal(await staticPage.locator('.timestamp').count(),0);
   assert((await staticPage.locator('.note-column .markdown').innerText()).includes('00:12'));
+  await unicodeVideoLinks(browser,local,false);
+  await unicodeVideoLinks(browser,preview,true);
   assert.deepEqual(errors,[]);
   console.log('PASS: local/static contracts, draft protection, real images/video source, region/chat SSE, upload/scan, stable job SSE/reconnect, mobile overflow, URL sanitization');
  } finally {await browser.close();}

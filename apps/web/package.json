@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && VITE_MARGINALIA_MODE=static vite build",
-    "check": "biome check src && tsc -b --pretty false"
+    "check": "biome check src && tsc -b --pretty false && node --test tests/video.test.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.2",

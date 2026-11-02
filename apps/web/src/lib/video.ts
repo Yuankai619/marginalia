@@ -1,10 +1,19 @@
 import type { CourseDetail, VideoTime } from "./types";
 
 export function parseVideoLink(href: string): VideoTime | null {
-  const match = /^video:([a-zA-Z0-9_-]+)\?t=(\d+(?:\.\d+)?)$/.exec(href);
-  if (!match) return null;
+  const match = /^video:([^?]+)\?t=(\d+(?:\.\d+)?)$/.exec(href);
+  if (!match || match[0] !== href) return null;
+  let video: string;
+  try {
+    video = decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+  // Python Unicode \w covers letters, numbers and underscore; mirror store.validate_id.
+  if (!video || video.startsWith("-") || /[^\p{L}\p{N}_-]/u.test(video))
+    return null;
   const time = Number(match[2]);
-  return Number.isFinite(time) && time >= 0 ? { video: match[1], time } : null;
+  return Number.isFinite(time) && time >= 0 ? { video, time } : null;
 }
 
 export function safeNoteUrl(href: string): string {

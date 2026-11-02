@@ -6,6 +6,8 @@
 
 ## 驗證
 
+`pnpm check` 會執行前端檢查與影片連結單元測試，涵蓋 Unicode ID、URL 編碼、非法 ID、時間點與 scheme 限制。
+
 先啟動 Vite 與建置預覽（不同終端）：
 
 ```sh
