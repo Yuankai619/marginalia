@@ -9,7 +9,15 @@ from __future__ import annotations
 
 from ..notes import notefile
 from ..notes.generate import STYLE
-from ..notes.material import NOTE_CHARS, TITLE_CHARS, Gatherer, clip, render
+from ..notes.material import (
+    NOTE_CHARS,
+    TITLE_CHARS,
+    Gatherer,
+    clip,
+    clock,
+    load_transcript,
+    render,
+)
 from ..store import Course, read_json
 
 MODES = ("qa", "interview", "review")
@@ -73,6 +81,45 @@ def course_outline(course: Course, current_deck: str | None = None, limit: int =
         return full
     out = "\n\n".join(_deck_text(d, slides[d["id"]], d["id"] == current_deck) for d in decks)
     return out if len(out) <= limit else out[:limit] + "\n（大綱過長，後面截斷）"
+
+
+def _course_material(course: Course, current_deck: str | None, limit: int) -> str:
+    """Preload readable material too: Codex cannot retrieve omitted files with tools."""
+    hidden = set(course.info().get("hiddenDecks", []))
+    documents = []
+    for deck in course.manifest()["decks"]:
+        if deck["id"] in hidden and deck["id"] != current_deck:
+            continue
+        for slide in course.slides(deck["id"]):
+            note = notefile.read(course.note_path(deck["id"], slide["index"]))
+            documents.append("\n".join([
+                f"## {deck['id']} 第 {slide['index']} 頁：{clip(slide.get('title') or '', TITLE_CHARS)}",
+                slide.get("text") or "", "講者備註：" + (slide.get("speakerNotes") or ""),
+                "筆記：" + (note[1] if note else ""),
+            ]))
+    for video in course.manifest()["videos"]:
+        segments, partial = load_transcript(course, video["id"])
+        lines = [f"## {video['id']} 逐字稿{'（轉錄中）' if partial else ''}"]
+        lines.extend(f"[{clock(row['start'])}](video:{video['id']}?t={round(row['start'])}) {row['text']}" for row in segments)
+        documents.append("\n".join(lines))
+    if not documents or limit <= 0:
+        return ""
+    if sum(map(len, documents)) + 2 * (len(documents) - 1) <= limit:
+        return "\n\n".join(documents)
+    remaining = max(0, limit - 2 * (len(documents) - 1))
+    budgets = [0] * len(documents)
+    order = sorted(range(len(documents)), key=lambda index: len(documents[index]))
+    for position, index in enumerate(order):
+        share = remaining // (len(order) - position)
+        budgets[index] = min(len(documents[index]), share)
+        remaining -= budgets[index]
+    # Short pages return their unused room to long notes and transcripts.
+    bounded = []
+    for document, budget in zip(documents, budgets, strict=True):
+        allowance = max(0, budget - len(clip(document, 0)))
+        bounded.append(document if len(document) <= budget else clip(document, allowance)[:budget])
+    return "\n\n".join(bounded)[:limit]
+
 
 
 def _region_text(region: dict) -> str | None:
@@ -143,5 +190,8 @@ def build_system(
     # every other section is capped; the outline takes what is left of the budget
     room = PROMPT_CHARS - sum(len(p) + 2 for p in parts) - 40
     if room > 0:
-        parts.insert(3, f"# 整門課的投影片大綱\n\n{course_outline(course, deck, room)}")
+        outline = course_outline(course, deck, room // 2)[:room // 2]
+        header = "\n\n# 整門課筆記、正文與逐字稿\n\n"
+        material = _course_material(course, deck, max(0, room - len(outline) - len(header)))
+        parts.insert(3, f"# 整門課的投影片大綱\n\n{outline}{header}{material}")
     return "\n\n".join(parts)[:PROMPT_CHARS]  # backstop: the caps above already keep it well under

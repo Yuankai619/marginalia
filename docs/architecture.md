@@ -67,6 +67,8 @@ See the docstring at the top of `server/marginalia/store.py`. Key points:
   目錄描述符，避免驗證後父目錄遭置換時跟隨新 symlink。轉錄暫存清理也使用同樣的目錄開啟方式。
   操作時使用既定根路徑作邊界，不再重新解析可遭置換的 root；影格快取也寫入已開啟的描述符，
   不讓 NumPy 由輸出名稱推導另一個檔名。
+  上傳也使用 store 的 `exclusive_output`：由相同的固定目錄 fd helper 建立父目錄，以
+  `O_CREAT | O_EXCL | O_NOFOLLOW` 建立新檔，寫入與失敗清理均沿用該 fd；同名檔案加序號而不覆寫。
   `frames.npz` 儲存相同的 `source`、`size`、`mtimeNs` 與裁框候選 `aspects`、快取格式 `version`；
   任何欄位不符或缺少時重新取樣，並保存 `numbers` 頁碼圖樣以區分動畫內容相似的頁面。
   頁碼區必須有局部對比；沒有足夠投影片 ink 的影格停用頁碼加分，空畫面不能單靠頁碼命中投影片。
@@ -158,6 +160,22 @@ survive re-alignment.
 
 All JSON. Errors: `{"detail": "<繁中訊息>"}` with a 4xx/5xx status.
 
+有副作用的請求會驗證 `Origin`；預設允許 `http://localhost:5173`、
+`http://127.0.0.1:5173`，並始終允許同源及未附 `Origin` 的本機 CLI 請求。
+可在啟動時用 `MARGINALIA_ALLOWED_ORIGINS` 取代預設清單，以逗號分隔完整來源
+（含協定、主機與必要的連接埠，不含路徑、結尾斜線或萬用字元）；項目前後空白與空項目會忽略。
+設定為空字串時，僅允許同源及未附 `Origin` 的請求。變更設定後須重啟開發伺服器。
+
+透過 Tailscale 存取時，例如：
+
+```sh
+MARGINALIA_ALLOWED_ORIGINS="http://localhost:5173,http://127.0.0.1:5173,http://100.81.100.96:5173" pnpm dev -- --host 100.81.100.96
+```
+
+Vite 仍將 `/api`、`/files` 代理至 `127.0.0.1:8765`；後端維持只監聽 loopback。
+API 的 TrustedHost 會額外允許設定清單內的主機名稱，支援 Vite 保留原始 Host 的代理方式；
+Origin 比對仍須符合清單中的協定、主機與連接埠，或與請求同源。
+
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
 | GET | `/api/health` | | `{mode:"local", version}` |
@@ -202,6 +220,12 @@ Chat request:
 
 SSE events: `{"type":"start","chatId"}`, `{"type":"text","delta"}`, `{"type":"tool","title","detail"}`,
 `{"type":"done","chatId","usage"?}`, `{"type":"error","message"}`.
+
+Claude 與 Codex 共用 `marginalia.agents.prompts.build_system(course, mode, deck, slide, selection, region)`。
+伺服器先驗證課程路徑，再預載可見簡報的投影片正文、講者備註、各頁筆記及影片逐字稿
+（包含轉錄中的 partial 檔）；逐字稿保留影片與時間連結。system prompt 統一上限為 120,000 字元，
+優先保留當頁、筆記、對齊至當頁的逐字稿、選取文字與圈選情境，其餘預算分配給整課資料，截斷會明示。
+Codex 沒有讀檔工具，所有可用課程 context 都必須由這份 prompt 提供。
 
 ## Static export (`pnpm build`)
 

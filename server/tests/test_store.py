@@ -130,3 +130,40 @@ def test_stale_output_paths_cannot_write_or_unlink_after_parent_becomes_symlink(
 
     assert sentinel.read_bytes() == b"sentinel"
     assert list(outside.glob(".tmp-*")) == []
+
+
+def test_exclusive_output_preserves_existing_and_cleans_interrupted_upload(course):
+    from marginalia.store import exclusive_output
+
+    path = course.materials / "fixture.txt"
+    path.write_bytes(b"original")
+    with pytest.raises(FileExistsError), exclusive_output(path, root=course.materials):
+        pytest.fail("existing file must not be opened")
+    assert path.read_bytes() == b"original"
+    incomplete = course.materials / "nested/incomplete.txt"
+    with (
+        pytest.raises(RuntimeError),
+        exclusive_output(incomplete, root=course.materials) as output,
+    ):
+        output.write(b"partial")
+        raise RuntimeError("fixture interruption")
+    assert not incomplete.exists()
+
+
+def test_exclusive_output_cleanup_stays_on_pinned_parent(course, tmp_path):
+    from marginalia.store import exclusive_output
+
+    parent = course.materials / "drop"
+    parent.mkdir()
+    moved = course.materials / "drop-old"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    protected = outside / "fixture.txt"
+    protected.write_bytes(b"outside original")
+    with pytest.raises(RuntimeError), exclusive_output(parent / "fixture.txt", root=course.materials) as output:
+        parent.rename(moved)
+        parent.symlink_to(outside, target_is_directory=True)
+        output.write(b"incomplete fixture")
+        raise RuntimeError("fixture interruption")
+    assert protected.read_bytes() == b"outside original"
+    assert not (moved / "fixture.txt").exists()
