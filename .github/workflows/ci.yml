@@ -29,7 +29,6 @@ jobs:
       - name: Lint
         working-directory: server
         run: uv run ruff check .
-        continue-on-error: true # Remove after K1 fixes the existing Ruff violations.
       - name: Test
         working-directory: server
         run: |

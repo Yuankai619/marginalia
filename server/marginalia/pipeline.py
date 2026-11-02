@@ -34,7 +34,7 @@ def process(course: Course, decks: list[str] | None = None, progress: Progress =
     to_render = [
         deck
         for deck in selected
-        if not (course.deck(deck) or {}).get("rendered") or not (course.deck_dir(deck) / "slides.json").exists()
+        if not (course.deck(deck) or {}).get("rendered") or not course.deck_path(deck, "slides.json").exists()
     ]
     for index, deck in enumerate(to_render):
         render_progress(index / max(len(to_render), 1), f"準備 {deck}")
@@ -51,10 +51,16 @@ def process(course: Course, decks: list[str] | None = None, progress: Progress =
         for segment in alignment["segments"]
         if segment.get("deck") in selected
     }
+    aligned_videos = {segment["video"] for segment in alignment["segments"] if segment.get("deck")}
+    # Unknown deck membership must not discard audio or unaligned recordings.
     to_transcribe = [
         video["id"]
         for video in manifest["videos"]
-        if video["id"] in target_videos and not (course.video_dir(video["id"]) / "transcript.json").exists()
+        if (
+            not decks or video.get("kind") == "audio"
+            or video["id"] in target_videos or video["id"] not in aligned_videos
+        )
+        and not course.transcript_current(video["id"])
     ]
     transcription_progress = _step(progress, 0.6, 0.25, "轉錄影片")
     for index, video in enumerate(to_transcribe):

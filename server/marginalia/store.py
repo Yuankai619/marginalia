@@ -59,7 +59,22 @@ def write_text(path: Path, text: str) -> None:
 
 
 def slide_name(index: int) -> str:
+    if not isinstance(index, int) or index < 1:
+        raise ValueError(f"bad slide index: {index!r}")
     return f"{index:03d}"
+
+
+def validate_id(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"\w[\w-]*", value):
+        raise ValueError(f"bad id: {value!r}")
+    return value
+
+
+def confined_path(root: Path, path: Path) -> Path:
+    resolved = path.resolve()
+    if not resolved.is_relative_to(root.resolve()):
+        raise ValueError(f"路徑超出允許範圍：{path}")
+    return resolved
 
 
 class Course:
@@ -67,43 +82,74 @@ class Course:
         if not re.fullmatch(r"[\w.-]+", course_id) or course_id.startswith("."):
             raise ValueError(f"bad course id: {course_id!r}")
         self.id = course_id
-        self.dir = config.COURSES_DIR / course_id
+        self._dir = config.COURSES_DIR / course_id
+
+    @property
+    def dir(self) -> Path:
+        return confined_path(config.COURSES_DIR, self._dir)
+
+    def path(self, *parts: str) -> Path:
+        root = self.dir
+        if parts and parts[0] in {config.MATERIALS, config.GENERATED, config.NOTES, config.CHATS}:
+            root = confined_path(root, root / parts[0])
+        return confined_path(root, self.dir.joinpath(*parts))
+
+    def source_path(self, source: str) -> Path:
+        if Path(source).is_absolute():
+            raise ValueError(f"來源必須是相對路徑：{source}")
+        return confined_path(self.materials, self.dir / source)
+
+    def fingerprint(self, entry: dict) -> dict:
+        stat = self.source_path(entry["source"]).stat()
+        return {"source": entry["source"], "size": stat.st_size, "mtimeNs": stat.st_mtime_ns}
+
+    def _validate_manifest(self, manifest: dict) -> dict:
+        for entry in manifest["decks"] + manifest["videos"]:
+            validate_id(entry["id"])
+            self.source_path(entry["source"])
+        return manifest
 
     # paths
     @property
     def materials(self) -> Path:
-        return self.dir / config.MATERIALS
+        return self.path(config.MATERIALS)
 
     @property
     def gen(self) -> Path:
-        return self.dir / config.GENERATED
+        return self.path(config.GENERATED)
 
     @property
     def notes_dir(self) -> Path:
-        return self.dir / config.NOTES
+        return self.path(config.NOTES)
 
     @property
     def chats_dir(self) -> Path:
-        return self.dir / config.CHATS
+        return self.path(config.CHATS)
+
+    def deck_path(self, deck: str, *parts: str) -> Path:
+        return self.path(config.GENERATED, "decks", validate_id(deck), *parts)
+
+    def video_path(self, video: str, *parts: str) -> Path:
+        return self.path(config.GENERATED, "videos", validate_id(video), *parts)
 
     def deck_dir(self, deck: str) -> Path:
-        return self.gen / "decks" / deck
+        return self.deck_path(deck)
 
     def video_dir(self, video: str) -> Path:
-        return self.gen / "videos" / video
+        return self.video_path(video)
 
     def note_path(self, deck: str, index: int) -> Path:
-        return self.notes_dir / deck / f"{slide_name(index)}.md"
+        return self.path(config.NOTES, validate_id(deck), f"{slide_name(index)}.md")
 
     def review_path(self, deck: str, index: int) -> Path:
-        return self.gen / "reviews" / deck / f"{slide_name(index)}.json"
+        return self.path(config.GENERATED, "reviews", validate_id(deck), f"{slide_name(index)}.json")
 
     # metadata
     def exists(self) -> bool:
         return self.dir.is_dir()
 
     def info(self) -> dict:
-        data = read_json(self.dir / "course.json", {}) or {}
+        data = read_json(self.path("course.json"), {}) or {}
         data.setdefault("title", self.id.replace("-", " ").title())
         data.setdefault("language", "en+zh-TW")
         data.setdefault("videoUrls", {})
@@ -113,36 +159,42 @@ class Course:
 
     def save_info(self, data: dict) -> None:
         data = {k: v for k, v in data.items() if k != "id"}
-        write_json(self.dir / "course.json", data)
+        write_json(self.path("course.json"), data)
 
     def manifest(self) -> dict:
-        return read_json(self.gen / "manifest.json", {"decks": [], "videos": []})
+        return self._validate_manifest(read_json(self.path(config.GENERATED, "manifest.json"), {"decks": [], "videos": []}))
 
     def save_manifest(self, m: dict) -> None:
-        write_json(self.gen / "manifest.json", m)
+        write_json(self.path(config.GENERATED, "manifest.json"), self._validate_manifest(m))
 
     def deck(self, deck_id: str) -> dict | None:
+        validate_id(deck_id)
         return next((d for d in self.manifest()["decks"] if d["id"] == deck_id), None)
 
     def video(self, video_id: str) -> dict | None:
+        validate_id(video_id)
         return next((v for v in self.manifest()["videos"] if v["id"] == video_id), None)
 
     def slides(self, deck_id: str) -> list[dict]:
-        return read_json(self.deck_dir(deck_id) / "slides.json", []) or []
+        return read_json(self.deck_path(deck_id, "slides.json"), []) or []
 
     def transcript(self, video_id: str) -> dict | None:
-        return read_json(self.video_dir(video_id) / "transcript.json")
+        return read_json(self.video_path(video_id, "transcript.json"))
+
+    def transcript_current(self, video_id: str) -> bool:
+        transcript = self.transcript(video_id)
+        return bool(transcript and transcript.get("sourceFingerprint") == self.fingerprint(self.video(video_id)))
 
     def alignment(self) -> dict:
-        return read_json(self.gen / "alignment.json", {"segments": []})
+        return read_json(self.path(config.GENERATED, "alignment.json"), {"segments": []})
 
     def status(self) -> dict:
-        return read_json(self.gen / "status.json", {}) or {}
+        return read_json(self.path(config.GENERATED, "status.json"), {}) or {}
 
     def set_status(self, key: str, value: dict) -> None:
         s = self.status()
         s[key] = value
-        write_json(self.gen / "status.json", s)
+        write_json(self.path(config.GENERATED, "status.json"), s)
 
 
 def list_courses() -> list[Course]:

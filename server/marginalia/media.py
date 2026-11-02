@@ -46,7 +46,10 @@ def sample_frames(video: Path, every: float = 2.0, width: int = 384, height: int
     proc = subprocess.Popen(
         [
             ffmpeg_exe(), "-loglevel", "error", "-i", str(video),
-            "-vf", f"fps=1/{every},scale={width}:{height},format=gray",
+            "-vf", (
+                f"fps=1/{every},scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=gray"
+            ),
             "-f", "rawvideo", "-",
         ],
         stdout=subprocess.PIPE,
