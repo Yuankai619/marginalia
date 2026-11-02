@@ -255,3 +255,55 @@ def test_video_that_never_aligns_does_not_cost_a_rerun_until_something_changes(c
     calls.clear()
     write_json(course.gen / "alignment.json", {"videos": {"v1": {"step": 2.0}}, "segments": []})  # alignment reran
     assert 1 in generate.generate_deck(course, "d1")["generated"]
+
+
+def _pipeline(course, monkeypatch, alignments: list[dict]):
+    """Run the real pipeline with media steps stubbed; each run's align step rewrites alignment.json (always, like
+    the real one does) with the next given content."""
+    import time
+
+    from marginalia import pipeline
+    from marginalia.store import write_json
+
+    for entry in course.manifest()["decks"] + course.manifest()["videos"]:
+        course.source_path(entry["source"]).parent.mkdir(parents=True, exist_ok=True)
+        course.source_path(entry["source"]).write_bytes(b"fixture")
+    runs = iter(alignments)
+
+    def align(*_):
+        data = next(runs)
+        time.sleep(0.01)  # a new mtime even on filesystems with coarse timestamps
+        write_json(course.gen / "alignment.json", data)
+        return data
+
+    monkeypatch.setattr(pipeline.ingest, "scan", lambda _: course.manifest())
+    monkeypatch.setattr(pipeline.slides, "render_deck", lambda *_: None)
+    monkeypatch.setattr(pipeline.align, "align_course", align)
+    monkeypatch.setattr(pipeline.transcribe, "transcribe_video", lambda *_: None)
+    return pipeline
+
+
+def test_realigning_with_the_same_result_does_not_regenerate(course, calls, monkeypatch):
+    # a recording with no usable frames: every run re-aligns and records nothing for it
+    nothing = {"videos": {}, "segments": []}
+    pipeline = _pipeline(course, monkeypatch, [dict(nothing), dict(nothing)])
+    pipeline.process(course, ["d1"])
+    assert len(calls) == 3 and notefile.read(course.note_path("d1", 1))[0]["partial"] is True
+    calls.clear()
+    pipeline.process(course, ["d1"])
+    assert calls == []
+
+
+def test_realigning_with_new_content_regenerates_partial_notes(course, calls, monkeypatch):
+    nothing = {"videos": {}, "segments": []}
+    found = {
+        "videos": {"v1": {"step": 2.0}},
+        "segments": [{"video": "v1", "start": 0.0, "end": 60.0, "deck": "d1", "slide": 1, "score": 0.9, "manual": False}],
+    }
+    pipeline = _pipeline(course, monkeypatch, [nothing, found])
+    pipeline.process(course, ["d1"])
+    calls.clear()
+    pipeline.process(course, ["d1"])
+    assert len(calls) == 1  # slide 1 now has its own transcript; 2 and 3 are final skips, no model call
+    assert "partial" not in notefile.read(course.note_path("d1", 1))[0]
+    assert notefile.read(course.note_path("d1", 2))[0]["status"] == "skipped"

@@ -243,7 +243,7 @@ async def areview_deck(
     progress = progress or (lambda f, msg: None)
     rv = Reviewer(course, deck_id, codex_home)
     # resuming reviews generated notes; listed slides are reviewed again (edited ones get findings, not rewrites)
-    def keep(front: dict | None) -> bool:
+    def keep(_: int, front: dict | None) -> bool:
         status = front and front.get("status", "edited")
         return status == "generated" or (status in ("reviewed", "edited") and (slides is not None or force))
 

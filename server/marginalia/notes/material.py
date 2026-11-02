@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,22 +31,6 @@ def clock(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
-def inputs_fingerprint(course: Course) -> str:
-    """Changes whenever alignment or any transcript file changes (file stats only, nothing is parsed). A partial note
-    is rewritten only when this moved on, so a video that never aligns cannot make every run pay for it again."""
-    files = [course.gen / "alignment.json"]
-    for v in course.manifest()["videos"]:
-        files += [course.video_dir(v["id"]) / "transcript.json", course.video_dir(v["id"]) / "transcript.partial.json"]
-    stats = []
-    for f in files:
-        try:
-            st = f.stat()
-            stats.append(f"{f.name}:{st.st_size}:{st.st_mtime_ns}")
-        except FileNotFoundError:
-            stats.append(f"{f.name}:-")
-    return hashlib.sha256("|".join(stats).encode()).hexdigest()[:12]
-
-
 def load_transcript(course: Course, video: str) -> tuple[list[dict], bool]:
     """Segments and whether they are partial (transcription still running or not started)."""
     full = course.transcript(video)
@@ -67,6 +52,8 @@ class Material:
     ranges: list[dict]
     lines: list[dict] = field(default_factory=list)  # {video, start, text}
     partial: bool = False  # some on-screen range has no transcript yet
+
+    inputs: str = ""  # fingerprint of everything alignment/transcription contributed to this slide
 
     @property
     def index(self) -> int:
@@ -104,8 +91,8 @@ class Gatherer:
         # recordings, audio (nothing to align), or a deck never shown in one gets final slide-only notes
         done = set(alignment.get("videos") or {}) | {s["video"] for s in segments}
         videos = [v for v in course.manifest()["videos"] if v.get("kind") != "audio"]
-        self.waiting = not self.aligned and any(v["id"] not in done for v in videos)
-        self.inputs = inputs_fingerprint(course)
+        self.pending = sorted(v["id"] for v in videos if v["id"] not in done)
+        self.waiting = not self.aligned and bool(self.pending)
 
     def transcript(self, video: str) -> tuple[list[dict], bool]:
         if video not in self._transcripts:
@@ -142,7 +129,21 @@ class Gatherer:
             ranges=ranges,
             lines=lines,
             partial=partial,
+            inputs=self._fingerprint(ranges, lines, partial),
         )
+
+    def _fingerprint(self, ranges: list[dict], lines: list[dict], partial: bool) -> str:
+        """Content, not files: what this slide's note was written from. Rewriting alignment.json or a transcript
+        with the same content (every pipeline run re-aligns) leaves it unchanged, so a partial note is only
+        regenerated when its material really moved on."""
+        used = {
+            "ranges": [[r["video"], r["start"], r["end"]] for r in ranges],
+            "lines": [[ln["video"], ln["start"], ln["text"]] for ln in lines],
+            "partial": partial,
+            "aligned": self.aligned,
+            "pending": self.pending if self.waiting else [],
+        }
+        return hashlib.sha256(json.dumps(used, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:12]
 
 
 def transcript_text(m: Material) -> str:

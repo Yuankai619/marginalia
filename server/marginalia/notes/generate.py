@@ -80,9 +80,8 @@ def meta(m: Material, status: str, partial: str | None = None) -> dict:
     return out
 
 
-async def write_note(course: Course, m: Material, aligned: bool, force: bool = False, inputs: str = "") -> str:
-    """Write one slide's note and return its status, or "kept" when the note changed meanwhile and was left alone.
-    `inputs` is the material fingerprint recorded on partial notes."""
+async def write_note(course: Course, m: Material, aligned: bool, force: bool = False) -> str:
+    """Write one slide's note and return its status, or "kept" when the note changed meanwhile and was left alone."""
     path = course.note_path(m.deck["id"], m.index)
     base = notefile.version(path)  # compare-and-swap: only replace the exact version we started from
     current = notefile.read(path)
@@ -96,19 +95,20 @@ async def write_note(course: Course, m: Material, aligned: bool, force: bool = F
         status, body = parse_output(await claude.complete(call))
         if not body:
             raise RuntimeError(f"第 {m.index} 頁模型沒有回傳內容")
-        partial = inputs if m.partial else None
+        partial = m.inputs if m.partial else None
     return status if notefile.commit(path, meta(m, status, partial), body, base, force) else "kept"
 
 
-def _wanted(slides: list[int] | None, force: bool, inputs: str):
-    """Resuming fills missing notes and rewrites partial ones once their material changed; listed slides are
+def _wanted(g: Gatherer, slides: list[int] | None, force: bool):
+    """Resuming fills missing notes and rewrites partial ones once their own material changed; listed slides are
     rewritten; the user's notes only with force."""
 
-    def keep(front: dict | None) -> bool:
+    def keep(i: int, front: dict | None) -> bool:
         if front is None or force:
             return True
-        stale = bool(front.get("partial")) and front.get("inputs") != inputs
-        return not notefile.protected(front) and (slides is not None or stale)
+        if notefile.protected(front):
+            return False
+        return slides is not None or (bool(front.get("partial")) and front.get("inputs") != g.get(i).inputs)
 
     return keep
 
@@ -118,7 +118,7 @@ async def agenerate_deck(
 ) -> dict:
     progress = progress or (lambda f, msg: None)
     g = Gatherer(course, deck_id)
-    todo = select(course, deck_id, len(g.slides), slides, _wanted(slides, force, g.inputs))
+    todo = select(course, deck_id, len(g.slides), slides, _wanted(g, slides, force))
     if not todo:
         progress(1.0, "沒有需要產生的筆記")
         return {"generated": [], "skipped": [], "kept": []}
@@ -126,7 +126,7 @@ async def agenerate_deck(
 
     async def one(i: int) -> str:
         async with sem:
-            return await write_note(course, g.get(i), g.aligned, force, g.inputs)
+            return await write_note(course, g.get(i), g.aligned, force)
 
     progress(0.0, f"產生 {len(todo)} 頁筆記")
     statuses = await run_slides(todo, one, "產生筆記", progress)

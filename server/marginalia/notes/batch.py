@@ -11,14 +11,15 @@ from . import notefile
 Progress = Callable[[float, str], None]
 
 
-def select(course: Course, deck_id: str, count: int, slides: list[int] | None, keep: Callable[[dict | None], bool]) -> list[int]:
-    """The listed slides (or all of them) whose note frontmatter passes `keep`; None when there is no note."""
+def select(course: Course, deck_id: str, count: int, slides: list[int] | None, keep: Callable[[int, dict | None], bool]) -> list[int]:
+    """The listed slides (or all of them) for which `keep(index, frontmatter)` holds; frontmatter is None when there
+    is no note."""
     out = []
     for i in slides if slides is not None else range(1, count + 1):
         if not 1 <= i <= count:
             raise IndexError(f"slide {i} not in deck {deck_id}")
         note = notefile.read(course.note_path(deck_id, i))
-        if keep(note[0] if note else None):
+        if keep(i, note[0] if note else None):
             out.append(i)
     return out
 
