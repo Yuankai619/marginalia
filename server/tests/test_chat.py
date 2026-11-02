@@ -215,23 +215,26 @@ def test_chat_modes_and_multiturn_persistence(tmp_path, monkeypatch):
 
 def test_claude_stream_close_closes_sdk_query(monkeypatch):
     closed = []
+    paths = []
 
     async def fake(**kwargs):
+        paths.append(Path(kwargs["options"].system_prompt["path"]))
         try:
             yield claude.AssistantMessage(
                 content=[claude.TextBlock(text="fixture")], model="fixture"
             )
             await asyncio.Event().wait()
         finally:
+            assert paths[0].is_file()
             closed.append(True)
 
     monkeypatch.setattr(claude, "query", fake)
 
     async def run():
-        events = claude.stream(claude.Call("question"))
+        events = claude.stream(claude.Call("question", system="private course context"))
         assert (await anext(events))["delta"] == "fixture"
         await events.aclose()
-        assert closed
+        assert closed and not paths[0].exists()
 
     asyncio.run(run())
 
@@ -632,4 +635,38 @@ def test_shared_course_prompt_has_one_budget_and_keeps_current_context(course):
             "SPEAKER_PRIORITY",
         )
     )
-    assert "已截斷" in system
+    assert "截斷" in system
+
+
+def test_formal_preload_reuses_short_page_budget_for_long_transcript(course):
+    from marginalia.agents import prompts
+    from marginalia.store import write_json
+
+    course.save_manifest(
+        {
+            "decks": [{"id": "short", "source": "materials/short.pdf"}],
+            "videos": [{"id": "lecture", "source": "materials/lecture.mp4"}],
+        }
+    )
+    write_json(
+        course.deck_path("short", "slides.json"),
+        [
+            {"index": index, "title": f"Page {index}", "text": "短" * 60}
+            for index in range(1, 101)
+        ],
+    )
+    write_json(
+        course.video_path("lecture", "transcript.json"),
+        {
+            "segments": [
+                {
+                    "start": 0,
+                    "end": 60,
+                    "text": "前" * 20_000 + "LATE_TRANSCRIPT_CONTEXT" + "後" * 40_000,
+                }
+            ],
+        },
+    )
+    material = prompts._course_material(course, None, 50_000)
+    assert "LATE_TRANSCRIPT_CONTEXT" in material
+    assert 49_000 <= len(material) <= 50_000

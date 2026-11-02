@@ -67,6 +67,8 @@ See the docstring at the top of `server/marginalia/store.py`. Key points:
   目錄描述符，避免驗證後父目錄遭置換時跟隨新 symlink。轉錄暫存清理也使用同樣的目錄開啟方式。
   操作時使用既定根路徑作邊界，不再重新解析可遭置換的 root；影格快取也寫入已開啟的描述符，
   不讓 NumPy 由輸出名稱推導另一個檔名。
+  上傳也使用 store 的 `exclusive_output`：由相同的固定目錄 fd helper 建立父目錄，以
+  `O_CREAT | O_EXCL | O_NOFOLLOW` 建立新檔，寫入與失敗清理均沿用該 fd；同名檔案加序號而不覆寫。
   `frames.npz` 儲存相同的 `source`、`size`、`mtimeNs` 與裁框候選 `aspects`、快取格式 `version`；
   任何欄位不符或缺少時重新取樣，並保存 `numbers` 頁碼圖樣以區分動畫內容相似的頁面。
   頁碼區必須有局部對比；沒有足夠投影片 ink 的影格停用頁碼加分，空畫面不能單靠頁碼命中投影片。
@@ -167,7 +169,7 @@ All JSON. Errors: `{"detail": "<繁中訊息>"}` with a 4xx/5xx status.
 透過 Tailscale 存取時，例如：
 
 ```sh
-MARGINALIA_ALLOWED_ORIGINS="http://localhost:5173,http://127.0.0.1:5173,http://100.81.100.96:5173" pnpm dev --host
+MARGINALIA_ALLOWED_ORIGINS="http://localhost:5173,http://127.0.0.1:5173,http://100.81.100.96:5173" pnpm dev -- --host 100.81.100.96
 ```
 
 Vite 仍將 `/api`、`/files` 代理至 `127.0.0.1:8765`；後端維持只監聽 loopback。

@@ -159,7 +159,9 @@ async def _messages(c: Call):
 async def stream(c: Call) -> AsyncIterator[dict]:
     """Yields {"type":"text","delta"} / {"type":"tool","title","detail"} / {"type":"done","usage"}."""
     prompt = _messages(c) if c.images or c.read_root else c.prompt
-    with tempfile.TemporaryDirectory(prefix="marginalia-claude-") as tmp:  # 0700: not readable by other users
+    with tempfile.TemporaryDirectory(
+        prefix="marginalia-claude-"
+    ) as tmp:  # 0700: not readable by other users
         opts = _options(c)
         if c.system:
             # chat system prompts carry the course outline and can pass the 128 KiB argv limit; a file also keeps
@@ -180,7 +182,9 @@ async def _events(prompt, opts: ClaudeAgentOptions) -> AsyncIterator[dict]:
                     if isinstance(b, TextBlock):
                         yield {"type": "text", "delta": b.text}
                     elif isinstance(b, ToolUseBlock):
-                        detail = b.input.get("file_path") or b.input.get("pattern") or ""
+                        detail = (
+                            b.input.get("file_path") or b.input.get("pattern") or ""
+                        )
                         yield {
                             "type": "tool",
                             "title": b.name,
@@ -190,6 +194,7 @@ async def _events(prompt, opts: ClaudeAgentOptions) -> AsyncIterator[dict]:
                 if msg.is_error:
                     raise RuntimeError(msg.result or "Claude 回傳錯誤")
                 yield {"type": "done", "usage": msg.usage, "cost": msg.total_cost_usd}
+
 
 async def complete(c: Call) -> str:
     parts = [e["delta"] async for e in stream(c) if e["type"] == "text"]

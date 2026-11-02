@@ -27,6 +27,7 @@ from .jobs import JobRunner, runner
 from .llm.accounts import accounts
 from .store import (
     Course,
+    exclusive_output,
     list_courses,
     read_json,
     slide_name,
@@ -315,12 +316,12 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
             or Path(folder or "").is_absolute()
         ):
             raise _error(422, "資料夾路徑不正確")
-        target = course.materials.joinpath(*parts)
+        materials = course.materials
+        target = materials.joinpath(*parts)
         try:
-            confined(target, course.materials)
+            confined(target, materials)
         except ValueError as exc:
             raise _error(422, "資料夾路徑不正確") from exc
-        target.mkdir(parents=True, exist_ok=True)
         saved = []
         for upload_file in files:
             raw_name = Path(upload_file.filename or "upload").name
@@ -331,17 +332,16 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
             stem, suffix, count = destination.stem, destination.suffix, 2
             while True:
                 try:
-                    confined(destination, course.materials)
-                    output = destination.open("xb")
+                    confined(destination, materials)
+                    with exclusive_output(destination, root=materials) as output:
+                        while chunk := await upload_file.read(1024 * 1024):
+                            output.write(chunk)
                     break
                 except FileExistsError:
                     destination = target / f"{stem}-{count}{suffix}"
                     count += 1
-                except ValueError as exc:
+                except (ValueError, OSError) as exc:
                     raise _error(422, "檔案路徑不正確") from exc
-            with output:
-                while chunk := await upload_file.read(1024 * 1024):
-                    output.write(chunk)
             saved.append(str(destination.relative_to(course.dir)))
         return {
             "saved": saved,

@@ -104,6 +104,30 @@ def atomic_output(path: Path, *, root: Path | None = None) -> Iterator[BinaryIO]
                 pass
 
 
+@contextmanager
+def exclusive_output(path: Path, *, root: Path) -> Iterator[BinaryIO]:
+    """Create one new file through the same pinned parent walk as atomic_output."""
+    destination = Path(os.path.abspath(path))
+    if not destination.is_relative_to(Path(os.path.abspath(root))):
+        raise ValueError(f"路徑超出允許範圍：{path}")
+    with _directory_fd(destination.parent) as directory:
+        fd = os.open(destination.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=directory)
+        identity = os.fstat(fd)
+        try:
+            with os.fdopen(fd, "wb") as output:
+                yield output
+                if not os.path.samestat(identity, os.stat(destination.name, dir_fd=directory, follow_symlinks=False)):
+                    raise ValueError("上傳檔案在寫入期間遭置換")
+        except BaseException:
+            try:
+                if os.path.samestat(identity, os.stat(destination.name, dir_fd=directory, follow_symlinks=False)):
+                    os.unlink(destination.name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+            raise
+
+
 def unlink_output(path: Path) -> None:
     try:
         with _directory_fd(path.parent, create=False) as directory:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from fastapi.testclient import TestClient
 
 from marginalia import config
@@ -473,3 +474,55 @@ def test_store_validation_errors_are_http_errors(tmp_path, monkeypatch):
         assert response.status_code == 422 and isinstance(
             response.json()["detail"], str
         )
+
+
+@pytest.mark.parametrize("when", ["before-pin", "after-pin"])
+@pytest.mark.parametrize("folder", ["drop", "drop/nested"])
+@pytest.mark.parametrize("ancestor", ["drop", "materials"])
+def test_upload_parent_swap_never_writes_through_symlink(
+    tmp_path, monkeypatch, when, folder, ancestor
+):
+    from contextlib import contextmanager
+
+    from marginalia import api, store
+
+    course = make_course(tmp_path, monkeypatch)
+    materials = course.materials
+    (materials / "drop").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = materials / folder
+    parent = materials if ancestor == "materials" else materials / "drop"
+    moved = parent.with_name(parent.name + "-old")
+    relative_file = target.relative_to(parent) / "fixture.txt"
+    original = store._directory_fd
+    swapped = []
+
+    def swap():
+        parent.rename(moved)
+        parent.symlink_to(outside, target_is_directory=True)
+        swapped.append(True)
+
+    @contextmanager
+    def controlled_walk(path, *, create=True):
+        if path == target and when == "before-pin":
+            swap()
+        with original(path, create=create) as directory:
+            if path == target and when == "after-pin":
+                swap()
+            yield directory
+
+    monkeypatch.setattr(store, "_directory_fd", controlled_walk)
+    monkeypatch.setattr(api.ingest, "scan", lambda _: {"decks": [], "videos": []})
+    response = TestClient(create_app(JobRunner())).post(
+        "/api/courses/demo/upload",
+        data={"folder": folder},
+        files={"files": ("fixture.txt", b"safe fixture")},
+    )
+    assert swapped == [True]
+    assert list(outside.iterdir()) == []
+    if when == "before-pin":
+        assert response.status_code == 422
+    else:
+        assert response.status_code == 200
+        assert (moved / relative_file).read_bytes() == b"safe fixture"
