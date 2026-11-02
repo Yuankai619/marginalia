@@ -22,6 +22,12 @@ pnpm build          # static, read-only site in apps/web/dist
 cd server && uv run marginalia --help
 ```
 
+需要從別台機器連線時，使用 `pnpm dev -- --host <本機 Tailscale IP>`，例如
+`pnpm dev -- --host 100.81.100.96`，再從同一 tailnet 開啟 `http://100.81.100.96:5173`。
+不要綁定 `0.0.0.0` 或公網 IP：開發介面沒有登入保護，會暴露教材與本機 Agent。
+`--host` 只傳給 Vite；uvicorn 保持監聽 `127.0.0.1:8765`，proxy 的 `/api`、`/files` 必須保留
+`changeOrigin: true`，避免後端 TrustedHost 拒絕來自其他裝置的 Host。
+
 The real course for manual testing lives in the main checkout at `courses/operating-system` (it is not in your
 worktree). Point a worktree at it with `MARGINALIA_COURSES=<main checkout>/courses`. Read it; don't modify
 `notes/` there unless your task says so.
