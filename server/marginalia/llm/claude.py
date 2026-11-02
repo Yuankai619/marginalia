@@ -13,7 +13,14 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, ToolUseBlock, query
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    ToolUseBlock,
+    query,
+)
 
 
 @dataclass
@@ -33,17 +40,17 @@ def _env() -> dict[str, str]:
 
 
 def _options(c: Call) -> ClaudeAgentOptions:
-    opts = dict(
-        system_prompt=c.system or None,
-        model=c.model,
-        cwd=str(c.cwd) if c.cwd else None,
-        allowed_tools=c.tools,
-        disallowed_tools=["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"],
-        permission_mode="default",
-        max_turns=c.max_turns,
-        env=_env(),
-        setting_sources=[],  # don't pick up the user's CLAUDE.md / hooks
-    )
+    opts = {
+        "system_prompt": c.system or None,
+        "model": c.model,
+        "cwd": str(c.cwd) if c.cwd else None,
+        "allowed_tools": c.tools,
+        "disallowed_tools": ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"],
+        "permission_mode": "default",
+        "max_turns": c.max_turns,
+        "env": _env(),
+        "setting_sources": [],  # don't pick up the user's CLAUDE.md / hooks
+    }
     if c.effort:
         opts["extra_args"] = {"effort": c.effort}
     return ClaudeAgentOptions(**{k: v for k, v in opts.items() if v is not None})

@@ -13,6 +13,7 @@ rectangle, so we find that rectangle first and compare only what is inside it.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from datetime import date
 
@@ -26,6 +27,7 @@ CW, CH = 128, 72  # stored crop of the slide area per frame
 STEP = 2.0  # seconds between sampled frames
 NONE = -1
 TITLE_ROWS = (3, 17)  # title band in a 72-row crop (skips the running header line)
+FRAME_CACHE_VERSION = 3
 
 
 def _crop(gray: np.ndarray) -> np.ndarray:
@@ -81,12 +83,34 @@ def _bright_box(img: np.ndarray, thresh: int = 110) -> tuple[int, int, int, int]
     return int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1
 
 
+def _fit_slide_aspect(box: tuple[int, int, int, int], shape: tuple[int, int]) -> tuple[int, int, int, int]:
+    """Trim a bright sharing rectangle to the 16:9 slide inside its border."""
+    x0, y0, x1, y1 = box
+    h, w = shape
+    bw, bh = x1 - x0, y1 - y0
+    if bw / bh > 16 / 9:
+        inset = (bw - bh * 16 / 9) / 2
+        x0, x1 = round(x0 + inset), round(x1 - inset)
+    else:
+        inset = (bh - bw * 9 / 16) / 2
+        y0, y1 = round(y0 + inset), round(y1 - inset)
+    return max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+
+
 def detect_region(frames: np.ndarray) -> tuple[int, int, int, int]:
     """Bounding box of the shared-slide area, from the median frame."""
     med = np.median(frames[:: max(1, len(frames) // 300)], axis=0).astype(np.uint8)
     box = _bright_box(med)
     h, w = frames.shape[1:]
-    return box or (0, 0, w, h)
+    return _fit_slide_aspect(box, (h, w)) if box else (0, 0, w, h)
+
+
+def _overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1, y1 = min(a[2], b[2]), min(a[3], b[3])
+    intersection = max(0, x1 - x0) * max(0, y1 - y0)
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - intersection
+    return intersection / union if union else 0.0
 
 
 def video_crops(course: Course, video_id: str, progress=lambda f, m: None) -> dict:
@@ -95,7 +119,7 @@ def video_crops(course: Course, video_id: str, progress=lambda f, m: None) -> di
     cache = vdir / "frames.npz"
     if cache.exists():
         d = np.load(cache)
-        if "crops" in d:
+        if d.get("version") == FRAME_CACHE_VERSION and "crops" in d:
             return {k: d[k] for k in ("times", "crops", "boxes")}
     v = course.video(video_id)
     if v.get("kind") == "audio":
@@ -113,12 +137,22 @@ def video_crops(course: Course, video_id: str, progress=lambda f, m: None) -> di
     win = 60
     for s in range(0, len(arr), win):
         chunk = arr[s : s + win]
-        box = _bright_box(np.median(chunk, axis=0).astype(np.uint8)) or glob_box
+        local = _bright_box(np.median(chunk, axis=0).astype(np.uint8))
+        local = _fit_slide_aspect(local, arr.shape[1:]) if local else None
+        # Browser bars and Webex controls can turn the per-window bright box
+        # taller than the slide.  A whole-video median is much more stable;
+        # accept a local box only when it agrees with it almost exactly.
+        box = local if local and _overlap(local, glob_box) >= 0.96 else glob_box
         x0, y0, x1, y1 = box
         for g in chunk:
             crops.append(_crop(g[y0:y1, x0:x1]))
             boxes.append(box)
-    out = {"times": np.array(times, np.float32), "crops": np.stack(crops), "boxes": np.array(boxes, np.int16)}
+    out = {
+        "times": np.array(times, np.float32),
+        "crops": np.stack(crops),
+        "boxes": np.array(boxes, np.int16),
+        "version": np.array(FRAME_CACHE_VERSION, np.uint8),
+    }
     vdir.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(cache, **out)
     return out
@@ -138,12 +172,24 @@ def slide_features(course: Course, deck_ids: list[str]) -> tuple[dict, list[tupl
 
 
 def _viterbi(sim: np.ndarray, keys: list[tuple[str, int]], prior: np.ndarray, none_level: float) -> np.ndarray:
-    """sim: T x N. Returns best state per frame (NONE = no slide visible)."""
+    """sim: T x N. Returns best state per frame (NONE = no slide visible).
+
+    A separate no-slide state is kept for each deck.  The earlier single
+    no-slide state let the path use a one-frame blank interval to jump from
+    any deck to any other deck, which was particularly harmful when animated
+    slides had weak visual scores.
+    """
     T, N = sim.shape
     tau = 0.04
-    emit = np.concatenate([sim / tau + prior[None, :], np.full((T, 1), none_level / tau)], axis=1)
-    S = N + 1
-    trans = np.full((S, S), -14.0, np.float32)  # arbitrary jump
+    decks = list(dict.fromkeys(deck for deck, _ in keys))
+    deck_index = {deck: i for i, deck in enumerate(decks)}
+    # slide states, one persistent blank state per deck, then the initial blank
+    blank_start = N
+    initial_blank = N + len(decks)
+    S = initial_blank + 1
+    emit = np.full((T, S), none_level / tau, np.float32)
+    emit[:, :N] = sim / tau + prior[None, :]
+    trans = np.full((S, S), -1_000_000.0, np.float32)
     deck_of = [k[0] for k in keys]
     for a in range(N):
         for b in range(N):
@@ -157,9 +203,26 @@ def _viterbi(sim: np.ndarray, keys: list[tuple[str, int]], prior: np.ndarray, no
                     trans[a, b] = -6.0 - abs(gap)  # flipping back or skipping a few
                 else:
                     trans[a, b] = -10.0
-    trans[:N, N] = -6.0
-    trans[N, :N] = -6.0
-    trans[N, N] = 0.0
+        deck = deck_index[deck_of[a]]
+        trans[a, blank_start + deck] = -5.0
+        # A lecture normally moves forwards through decks.  Requiring the
+        # first few slides prevents an early false match from landing midway
+        # through a later deck.
+        if deck + 1 < len(decks):
+            for b, (other, page) in enumerate(keys):
+                if other == decks[deck + 1] and page <= 3:
+                    trans[a, b] = -14.0
+    for deck, name in enumerate(decks):
+        blank = blank_start + deck
+        trans[blank, blank] = 0.0
+        for b, (other, page) in enumerate(keys):
+            if other == name:
+                trans[blank, b] = -5.0
+            elif deck + 1 < len(decks) and other == decks[deck + 1] and page <= 3:
+                trans[blank, b] = -14.0
+    trans[initial_blank, initial_blank] = 0.0
+    for b in range(N):
+        trans[initial_blank, b] = -7.0
     score = emit[0].copy()
     back = np.zeros((T, S), np.int32)
     for t in range(1, T):
@@ -170,7 +233,7 @@ def _viterbi(sim: np.ndarray, keys: list[tuple[str, int]], prior: np.ndarray, no
     path[-1] = int(np.argmax(score))
     for t in range(T - 1, 0, -1):
         path[t - 1] = back[t, path[t]]
-    path[path == N] = NONE
+    path[path >= N] = NONE
     return path
 
 
@@ -190,22 +253,41 @@ def _deck_prior(course: Course, keys, video_date: str) -> np.ndarray:
     return out
 
 
+def _deck_family(deck_id: str) -> str:
+    """Remove the trailing date used to distinguish archived deck versions."""
+    return re.sub(r"[-_]?(?:20)?\d{6,8}(?:v\d+)?$", "", deck_id, flags=re.IGNORECASE).rstrip("-_")
+
+
+def candidate_decks(course: Course, video_date: str) -> list[str]:
+    """Keep the latest deck version that was available on the lecture date."""
+    hidden = set(course.info()["hiddenDecks"])
+    chosen: dict[str, dict] = {}
+    for deck in course.manifest()["decks"]:
+        if not deck.get("rendered") or deck["id"] in hidden or deck.get("date", "") > video_date:
+            continue
+        family = _deck_family(deck["id"])
+        if family not in chosen or deck["date"] > chosen[family]["date"]:
+            chosen[family] = deck
+    return [deck["id"] for deck in chosen.values()]
+
+
 def align_course(course: Course, progress: Callable[[float, str], None] = lambda f, m: None, videos: list[str] | None = None) -> dict:
-    info = course.info()
     man = course.manifest()
-    decks = [d["id"] for d in man["decks"] if d.get("rendered") and d["id"] not in info["hiddenDecks"]]
     vids = [v for v in man["videos"] if not videos or v["id"] in videos]
-    slide_ft, keys = slide_features(course, decks)
     old = course.alignment()
     segments = [s for s in old.get("segments", []) if s["video"] not in {v["id"] for v in vids} and not s.get("manual")]
     manual = [s for s in old.get("segments", []) if s.get("manual")]
     meta = old.get("videos", {})
 
     for vi, v in enumerate(vids):
-        sub = lambda f, m, vi=vi: progress((vi + f) / len(vids), f"{v['title']}：{m}")
+        sub = lambda f, m, vi=vi, v=v: progress((vi + f) / len(vids), f"{v['title']}：{m}")
         fp = video_crops(course, v["id"], sub)
         if len(fp["times"]) == 0:
             continue
+        decks = candidate_decks(course, v["date"])
+        if not decks:
+            continue
+        slide_ft, keys = slide_features(course, decks)
         sub(0.85, "比對投影片")
         sim = similarity(_features(fp["crops"]), slide_ft)
         path = _viterbi(sim, keys, _deck_prior(course, keys, v["date"]), none_level=0.45)

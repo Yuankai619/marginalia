@@ -45,7 +45,12 @@ def _pdf_pages(pdf: Path) -> int:
 
 
 def _pdf_text(pdf: Path, page: int) -> str:
-    r = subprocess.run(["pdftotext", "-f", str(page), "-l", str(page), "-layout", str(pdf), "-"], capture_output=True, text=True)
+    r = subprocess.run(
+        ["pdftotext", "-f", str(page), "-l", str(page), "-layout", str(pdf), "-"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
     return r.stdout.strip()
 
 
