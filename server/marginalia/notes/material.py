@@ -15,6 +15,8 @@ MAX_TRANSCRIPT_CHARS = 30_000  # ~50 minutes of speech; a slide that stays up lo
 SLIDE_TEXT_CHARS = 8_000
 OUTLINE_CHARS = 6_000
 NOTE_CHARS = 20_000
+TITLE_CHARS = 200
+MAX_RANGES = 20
 
 
 def clip(text: str, limit: int) -> str:
@@ -78,7 +80,13 @@ class Gatherer:
         self.outline = outline(self.slides)
         self._transcripts: dict[str, tuple[list[dict], bool]] = {}
         # without any alignment for the deck we can't tell skipped slides apart; writers then work from slides only
-        self.aligned = any(s["deck"] == deck_id for s in course.alignment().get("segments", []))
+        alignment = course.alignment()
+        segments = alignment.get("segments", [])
+        self.aligned = any(s["deck"] == deck_id for s in segments)
+        # an unaligned deck is only "not done yet" while some video still waits for alignment; a course without
+        # recordings (or a deck never shown in one) gets final slide-only notes
+        done = set(alignment.get("videos") or {}) | {s["video"] for s in segments}
+        self.waiting = not self.aligned and any(v["id"] not in done for v in course.manifest()["videos"])
 
     def transcript(self, video: str) -> tuple[list[dict], bool]:
         if video not in self._transcripts:
@@ -93,7 +101,7 @@ class Gatherer:
         every = slide_ranges(self.course, self.deck["id"], index, 0.0)
         ranges = [r for r in every if r["end"] - r["start"] >= MIN_RANGE] or every
         lines: list[dict] = []
-        partial = False
+        partial = self.waiting
         for r in ranges:
             segs, is_partial = self.transcript(r["video"])
             covered_to = segs[-1]["end"] if segs else 0.0
@@ -134,16 +142,18 @@ def render(m: Material) -> str:
     """The slide's material as one block of prompt text (the slide image is attached separately)."""
     s = m.slide
     parts = [
-        f"# 簡報：{m.deck.get('title', m.deck['id'])}（{m.deck['id']}）",
+        f"# 簡報：{clip(m.deck.get('title') or m.deck['id'], TITLE_CHARS)}（{m.deck['id']}）",
         f"## 整份簡報大綱\n{clip(m.outline, OUTLINE_CHARS)}",
-        f"## 本頁：第 {m.index} 頁「{s.get('title') or ''}」",
-        f"前一頁：{m.prev_title or '（無）'}；後一頁：{m.next_title or '（無）'}",
+        f"## 本頁：第 {m.index} 頁「{clip(s.get('title') or '', TITLE_CHARS)}」",
+        f"前一頁：{clip(m.prev_title or '（無）', TITLE_CHARS)}；後一頁：{clip(m.next_title or '（無）', TITLE_CHARS)}",
         f"### 投影片文字\n{clip((s.get('text') or '').strip(), SLIDE_TEXT_CHARS) or '（無文字）'}",
     ]
     if (s.get("speakerNotes") or "").strip():
         parts.append(f"### 講者備註\n{clip(s['speakerNotes'].strip(), SLIDE_TEXT_CHARS)}")
     if m.ranges:
-        spans = "、".join(f"{r['video']} {clock(r['start'])}–{clock(r['end'])}（t={r['start']:.0f}–{r['end']:.0f}）" for r in m.ranges)
+        spans = "、".join(f"{r['video']} {clock(r['start'])}–{clock(r['end'])}（t={r['start']:.0f}–{r['end']:.0f}）" for r in m.ranges[:MAX_RANGES])
+        if len(m.ranges) > MAX_RANGES:
+            spans += f"，另有 {len(m.ranges) - MAX_RANGES} 段"
         parts.append(f"### 這頁出現在影片的時間\n{spans}")
     else:
         parts.append("### 這頁出現在影片的時間\n（對齊結果裡這頁沒有出現在任何影片上）")

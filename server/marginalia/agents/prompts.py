@@ -9,12 +9,11 @@ from __future__ import annotations
 
 from ..notes import notefile
 from ..notes.generate import STYLE
-from ..notes.material import NOTE_CHARS, Gatherer, clip, render
+from ..notes.material import NOTE_CHARS, TITLE_CHARS, Gatherer, clip, render
 from ..store import Course, read_json
 
 MODES = ("qa", "interview", "review")
 PROMPT_CHARS = 120_000  # whole system prompt; the course outline gets whatever the other sections leave
-MIN_OUTLINE_CHARS = 4_000
 SELECTION_CHARS = 4_000
 FINDINGS_CHARS = 6_000
 
@@ -130,7 +129,8 @@ def build_system(
     if deck is not None and course.deck(deck) is None:
         raise KeyError(deck)
     info = course.info()
-    parts = [ROLE, MODE_RULES[mode], f"# 課程：{info['title']}" + (f"（{info['subtitle']}）" if info.get("subtitle") else "")]
+    title = clip(str(info["title"]), TITLE_CHARS) + (f"（{clip(str(info['subtitle']), TITLE_CHARS)}）" if info.get("subtitle") else "")
+    parts = [ROLE, MODE_RULES[mode], f"# 課程：{title}"]
     if mode == "review":
         parts.append(f"# 筆記寫作規範\n\n{STYLE}")
     if deck is not None and slide is not None:
@@ -141,6 +141,7 @@ def build_system(
     if isinstance(region, dict) and (text := _region_text(region)):
         parts.append(f"# 學生框選的區域\n\n{text}")
     # every other section is capped; the outline takes what is left of the budget
-    room = max(MIN_OUTLINE_CHARS, PROMPT_CHARS - sum(len(p) + 2 for p in parts) - 40)
-    parts.insert(3, f"# 整門課的投影片大綱\n\n{course_outline(course, deck, room)}")
-    return "\n\n".join(parts)
+    room = PROMPT_CHARS - sum(len(p) + 2 for p in parts) - 40
+    if room > 0:
+        parts.insert(3, f"# 整門課的投影片大綱\n\n{course_outline(course, deck, room)}")
+    return "\n\n".join(parts)[:PROMPT_CHARS]  # backstop: the caps above already keep it well under

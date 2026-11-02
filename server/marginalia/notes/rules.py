@@ -32,6 +32,9 @@ MERMAID = re.compile(r"^```mermaid[ \t]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.D
 DIAGRAMS = ("flowchart", "sequenceDiagram", "stateDiagram-v2", "classDiagram", "block-beta")
 UNQUOTED_PAREN_LABEL = re.compile(r"\w\[(?!\")[^\]\n]*[()][^\]\n]*\]")
 IMAGE = re.compile(r"!\[[^\]]*\]\(([^)\s]*)[^)]*\)")
+REF_IMAGE = re.compile(r"!\[[^\]]*\](?!\()")  # ![alt][ref] / ![ref]: destinations live elsewhere, not supported
+HTML_IMAGE = re.compile(r"<img\b", re.IGNORECASE)
+MAX_RULE_FINDINGS = 40
 IMAGE_PATH = re.compile(r"assets/([\w.-]+\.(?:png|jpe?g|webp|svg))")
 QUESTION_HEADING = re.compile(r"^#+\s.*[?？]\s*$", re.MULTILINE)
 LINK = re.compile(r"\[([^\]\n]*)\]\(video:([^)\s?]*)\?t=([^)\s]*)\)")
@@ -114,22 +117,36 @@ def check_mermaid(body: str) -> list[dict]:
         if head.split(" ")[0] not in DIAGRAMS:
             out.append(_finding("high", quote, f"mermaid 圖類型「{head.split(' ')[0]}」不支援，圖會壞掉。", f"第一行改成 {'、'.join(DIAGRAMS)} 其中之一。"))
             continue
-        if not _brackets_balanced(src):
+        syntax = "\n".join(ln for ln in src.splitlines() if not ln.strip().startswith("%%"))  # comments hold anything
+        if not _brackets_balanced(syntax):
             out.append(_finding("high", quote, "mermaid 圖的括號沒有配對，圖會壞掉。", "檢查每個節點的 [ ]、( )、{ } 是否成對。"))
         if head.startswith("flowchart"):
-            for hit in UNQUOTED_PAREN_LABEL.finditer(src):
+            for hit in UNQUOTED_PAREN_LABEL.finditer(syntax):
                 out.append(_finding("high", hit.group(0), "節點文字裡有括號卻沒加引號，mermaid 會解析失敗。", '節點文字用雙引號包起來，例如 A["CPU (中央處理器)"]。'))
     return out
 
 
-def check_images(body: str, m: Material) -> list[dict]:
+def _asset_ok(m: Material, name: str) -> bool:
+    """The file sits directly in this deck's assets folder: no symlink, nothing resolving outside it."""
+    path = m.assets / name
+    folder = m.assets.parent.resolve() / "assets"  # where assets must really be, even if `assets` itself is a link
+    return not path.is_symlink() and path.resolve().parent == folder and path.is_file()
+
+
+def check_images(text: str, body: str, m: Material) -> list[dict]:
+    """Images in the prose (`text`, code blanked out), quoting from `body`."""
     out = []
-    for hit in IMAGE.finditer(body):
+    for hit in IMAGE.finditer(text):
+        quote = body[hit.start() : hit.end()][:80]
         path = IMAGE_PATH.fullmatch(hit.group(1))
         if not path:
-            out.append(_finding("high", hit.group(0)[:80], "圖片路徑必須是 assets/<檔名>.png|jpg|webp|svg。", "把圖放進這份簡報的 notes/<deck>/assets/，用相對路徑引用。"))
-        elif not (m.assets / path.group(1)).is_file():
-            out.append(_finding("high", hit.group(0)[:80], f"圖片 {hit.group(1)} 不存在。", "放上圖檔，或拿掉這張圖改用 mermaid。"))
+            out.append(_finding("high", quote, "圖片路徑必須是 assets/<檔名>.png|jpg|webp|svg。", "把圖放進這份簡報的 notes/<deck>/assets/，用相對路徑引用。"))
+        elif not _asset_ok(m, path.group(1)):
+            out.append(_finding("high", quote, f"圖片 {hit.group(1)} 不存在，或不是 assets/ 裡的一般檔案。", "放上圖檔（不要用連結），或拿掉這張圖改用 mermaid。"))
+    for hit in REF_IMAGE.finditer(text):
+        out.append(_finding("high", body[hit.start() : hit.end()][:80], "不支援參照式圖片。", "改成 ![說明](assets/<檔名>.svg)。"))
+    for hit in HTML_IMAGE.finditer(text):
+        out.append(_finding("high", body[hit.start() : hit.start() + 60], "不允許用 HTML 放圖片。", "改成 ![說明](assets/<檔名>.svg)。"))
     return out
 
 
@@ -174,4 +191,16 @@ def check(body: str, m: Material) -> list[dict]:
         out.append(_finding("medium", _context(body, hit.start(), hit.end()), "使用 emoji 或裝飾符號。", "刪掉。"))
     for hit in QUESTION_HEADING.finditer(text):
         out.append(_finding("low", hit.group(0).strip(), "問句當標題。", "改成描述性的短標題，或拿掉標題。"))
-    return out + check_marks(text, body) + check_mermaid(body) + check_images(body, m) + check_links(body, m)
+    out += check_marks(text, body) + check_mermaid(body) + check_images(text, body, m) + check_links(body, m)
+    return _dedupe(out)[:MAX_RULE_FINDINGS]
+
+
+def _dedupe(findings: list[dict]) -> list[dict]:
+    """One finding per problem and quote, most severe first; a note repeating one mistake 1,000 times gives one row
+    per distinct spot and the list stays bounded."""
+    seen, out = set(), []
+    for f in sorted(findings, key=lambda f: ("high", "medium", "low").index(f["severity"])):
+        if (f["problem"], f["quote"]) not in seen:
+            seen.add((f["problem"], f["quote"]))
+            out.append(f)
+    return out

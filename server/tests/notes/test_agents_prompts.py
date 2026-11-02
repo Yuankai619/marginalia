@@ -89,3 +89,11 @@ def test_bad_input(course):
         prompts.build_system(course, "qa", "nope", 1)
     with pytest.raises(IndexError):
         prompts.build_system(course, "qa", "d1", 9)
+
+
+def test_course_metadata_cannot_blow_the_budget(course):
+    write_json(course.dir / "course.json", {"title": "長" * 200_000, "subtitle": "副" * 200_000})
+    slides = course.slides("d1")
+    slides[0]["title"] = "題" * 200_000
+    write_json(course.deck_dir("d1") / "slides.json", slides)
+    assert len(prompts.build_system(course, "qa", "d1", 2)) <= prompts.PROMPT_CHARS

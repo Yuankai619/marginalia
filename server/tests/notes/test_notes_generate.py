@@ -190,3 +190,24 @@ def test_note_without_status_counts_as_edited(course, calls):
     course.note_path("d1", 1).parent.mkdir(parents=True)
     course.note_path("d1", 1).write_text("手寫的，沒有 frontmatter")
     assert generate.generate_deck(course, "d1", slides=[1]) == {"generated": [], "skipped": [], "kept": []}
+
+
+def test_course_without_recordings_gets_final_notes(course, calls):
+    from marginalia.store import write_json
+
+    man = course.manifest()
+    man["videos"] = []
+    course.save_manifest(man)
+    write_json(course.gen / "alignment.json", {"videos": {}, "segments": []})
+    assert generate.generate_deck(course, "d1")["generated"] == [1, 2, 3]
+    assert "partial" not in notefile.read(course.note_path("d1", 1))[0]
+    calls.clear()
+    assert generate.generate_deck(course, "d1")["generated"] == [] and not calls  # nothing left to do
+
+
+def test_unaligned_deck_waits_while_videos_are_not_aligned(course, calls):
+    from marginalia.store import write_json
+
+    write_json(course.gen / "alignment.json", {"videos": {}, "segments": []})  # v1 exists but is not aligned yet
+    generate.generate_deck(course, "d1", slides=[1])
+    assert notefile.read(course.note_path("d1", 1))[0]["partial"] is True

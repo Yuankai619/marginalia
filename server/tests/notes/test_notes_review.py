@@ -222,14 +222,68 @@ def test_mermaid_checks(course):
     assert problems(TOP + "```mermaid\nflowchart LR\n  A --> B", m) == ["程式碼區塊（```）沒有關閉。"]
 
 
-def test_image_checks(course):
+def test_image_checks(course, tmp_path):
     m = Gatherer(course, "d1").get(2)
     m.assets.mkdir(parents=True)
     (m.assets / "arch.svg").write_text("<svg/>")
+    missing = "圖片 assets/missing.png 不存在，或不是 assets/ 裡的一般檔案。"
     assert rules.check(TOP + "![架構](assets/arch.svg)", m) == []
-    assert problems(TOP + "![x](assets/missing.png)", m) == ["圖片 assets/missing.png 不存在。"]
+    assert problems(TOP + "![x](assets/missing.png)", m) == [missing]
     for bad in ("../secret.png", "/etc/passwd", "assets/../../x.svg", "https://example.com/a.png", "assets/a.gif"):
         assert problems(TOP + f"![x]({bad})", m) == ["圖片路徑必須是 assets/<檔名>.png|jpg|webp|svg。"], bad
+    # code is not an image; reference-style and HTML images are refused rather than half-checked
+    assert rules.check(TOP + "範例：`![圖](assets/not-created.svg)`\n\n```\n![圖](assets/x.svg)\n```", m) == []
+    assert problems(TOP + "![圖][arch]\n\n[arch]: ../../outside.svg", m) == ["不支援參照式圖片。"]
+    assert problems(TOP + '<img src="assets/arch.svg">', m) == ["不允許用 HTML 放圖片。"]
+    # a link inside assets/ pointing outside is not an asset
+    outside = tmp_path / "outside.svg"
+    outside.write_text("<svg/>")
+    (m.assets / "link.svg").symlink_to(outside)
+    assert problems(TOP + "![x](assets/link.svg)", m) == ["圖片 assets/link.svg 不存在，或不是 assets/ 裡的一般檔案。"]
+
+
+def test_assets_folder_that_is_a_link_is_refused(course, tmp_path):
+    m = Gatherer(course, "d1").get(2)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "a.svg").write_text("<svg/>")
+    m.assets.parent.mkdir(parents=True)
+    m.assets.symlink_to(elsewhere)
+    assert problems(TOP + "![x](assets/a.svg)", m) == ["圖片 assets/a.svg 不存在，或不是 assets/ 裡的一般檔案。"]
+
+
+def test_mermaid_comments_are_not_syntax(course):
+    m = Gatherer(course, "d1").get(2)
+    src = 'flowchart TD\n%% [這是註解，不是節點 (\n  A["CPU"] --> B["RAM"]'
+    assert rules.check(TOP + f"```mermaid\n{src}\n```", m) == []
+
+
+def test_rule_findings_are_deduplicated_and_bounded(course):
+    m = Gatherer(course, "d1").get(2)
+    found = rules.check(TOP + "總之。" * 10_000, m)
+    assert len(found) <= rules.MAX_RULE_FINDINGS
+
+
+def test_long_note_is_not_rewritten(written, monkeypatch):
+    seen = fake_models(monkeypatch)
+    path = written.note_path("d1", 1)
+    meta, _ = notefile.read(path)
+    body = "總之開頭。\n\n" + "內容。" * 8_000 + "\n\nTAIL_MUST_SURVIVE"
+    notefile.write(path, meta, body)
+    out = review.review_deck(written, "d1", slides=[1])
+    assert out["too_long"] == [1] and not seen  # no model saw a truncated note
+    meta2, body2 = notefile.read(path)
+    assert body2.endswith("TAIL_MUST_SURVIVE") and meta2["status"] == "generated"
+    assert "超過自動審稿上限" in read_json(written.review_path("d1", 1))["findings"][-1]["problem"]
+
+
+def test_revision_prompt_stays_bounded(course):
+    m = Gatherer(course, "d1").get(2)
+    findings = rules.check("總之。" * 10_000, m) + [
+        {"reviewer": "style", "severity": "medium", "quote": "q" * 600, "problem": "p" * 600, "fix": "f" * 600}
+    ] * 500
+    prompt = review.revise_prompt(m, "總之。" * 5_000, findings)
+    assert len(prompt) < 60_000 and "這次先不處理" in prompt
 
 
 def test_links_without_transcript_use_the_on_screen_range(course):

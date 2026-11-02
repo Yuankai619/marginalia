@@ -1,9 +1,12 @@
 """One-shot calls through `codex exec`, the optional second engine.
 
 Codex's read-only sandbox still lets its tools read any file on the machine, and the prompt carries untrusted course
-text, so Codex gets no tools at all: every tool feature is disabled and the material travels inside the prompt (plus
-attached images). It runs in an empty temp dir with an allowlisted environment, without the user's config.toml, and
-only with a ChatGPT subscription login: a CODEX_HOME holding an API-key login is refused before Codex starts.
+text, so Codex runs with every tool source turned off and the material travels inside the prompt (plus attached
+images). The CLI (0.165) still declares two tools nothing can remove: `exec`, whose code-mode host is disabled so every
+call fails, and `wait`, which only waits on exec. Before the first call we render the model-visible tool list offline
+(`codex debug prompt-input`, no model call) with the same flags and refuse to run if anything else shows up, so a CLI
+upgrade that adds a tool fails closed. It runs in an empty temp dir with an allowlisted environment, without the
+user's config.toml, and only with a ChatGPT subscription login: an API-key login is refused before Codex starts.
 """
 
 from __future__ import annotations
@@ -16,10 +19,16 @@ import tempfile
 from pathlib import Path
 
 NO_TOOLS = (
-    "shell_tool", "unified_exec", "code_mode_host", "view_image", "browser_use", "browser_use_external",
+    "shell_tool", "unified_exec", "code_mode_host", "code_mode", "view_image", "browser_use", "browser_use_external",
     "in_app_browser", "computer_use", "apps", "plugins", "remote_plugin", "skill_search", "tool_suggest", "memories",
-    "goals",
+    "goals", "multi_agent", "multi_agent_v2", "image_generation", "sleep_tool",
 )  # fmt: skip
+CONFIG = (
+    'forced_login_method="chatgpt"', 'web_search="disabled"', "mcp_servers={}", "agents.enabled=false",
+    "tools.experimental_request_user_input.enabled=false", "tools.update_plan.enabled=false",
+)  # fmt: skip
+INERT_TOOLS = {"functions.exec", "functions.wait"}  # exec's host is disabled by code_mode_host above
+_verified = False  # the tool list passed once in this process
 ENV_KEEP = (
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR",
     "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
@@ -51,12 +60,57 @@ def _env(codex_home: Path | None) -> dict[str, str]:
     return {**{k: os.environ[k] for k in ENV_KEEP if k in os.environ}, "CODEX_HOME": str(_home(codex_home))}
 
 
-def _args(tmp: str, out: Path, model: str | None, images: list[Path]) -> list[str]:
-    args = ["codex", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--sandbox", "read-only"]
-    args += ["--color", "never", "-C", tmp, "-o", str(out)]
-    args += ["-c", 'forced_login_method="chatgpt"', "-c", 'web_search="disabled"', "-c", "mcp_servers={}"]
+def _lockdown() -> list[str]:
+    args = [a for c in CONFIG for a in ("-c", c)]
     for feature in NO_TOOLS:
         args += ["--disable", feature]
+    return args
+
+
+def tool_names(prompt_input: list) -> list[str]:
+    """Model-visible tool names from `codex debug prompt-input` output."""
+
+    def walk(tools: list, prefix: str = "") -> list[str]:
+        out = []
+        for t in tools:
+            name = f"{prefix}{t.get('name') or t.get('type')}"
+            out += walk(t["tools"], f"{name}.") if t.get("tools") else [name]
+        return out
+
+    return [n for item in prompt_input if item.get("type") == "additional_tools" for n in walk(item.get("tools", []))]
+
+
+async def verify_tools() -> None:
+    """Fail closed unless the model would see only the inert tools. Offline: renders the prompt and calls no model.
+    Runs against an empty CODEX_HOME, i.e. defaults plus our flags, which is what `exec --ignore-user-config` gets."""
+    global _verified
+    if _verified:
+        return
+    with tempfile.TemporaryDirectory(prefix="marginalia-codex-") as tmp:
+        home = Path(tmp) / "home"
+        home.mkdir()
+        proc = await asyncio.create_subprocess_exec(
+            "codex", "debug", "prompt-input", *_lockdown(), "x",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, cwd=tmp, env=_env(home),
+        )  # fmt: skip
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), 60)
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+    try:
+        names = tool_names(json.loads(out))
+    except (ValueError, AttributeError, TypeError):
+        raise RuntimeError("無法確認 Codex 的工具清單，不使用 Codex") from None
+    if not names or set(names) - INERT_TOOLS:  # empty means the CLI stopped listing tools here: can't verify
+        raise RuntimeError(f"Codex 會拿到工具 {', '.join(sorted(set(names) - INERT_TOOLS)) or '（無法確認）'}，不使用 Codex")
+    _verified = True
+
+
+def _args(tmp: str, out: Path, model: str | None, images: list[Path]) -> list[str]:
+    args = ["codex", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--sandbox", "read-only"]
+    args += ["--color", "never", "-C", tmp, "-o", str(out), *_lockdown()]
     if model:
         args += ["-m", model]
     for img in images:
@@ -75,6 +129,7 @@ async def complete(
     """Run one prompt and return codex's final message."""
     if problem := login_problem(codex_home):
         raise RuntimeError(problem)
+    await verify_tools()
     with tempfile.TemporaryDirectory(prefix="marginalia-codex-") as tmp:
         out = Path(tmp) / "last.txt"
         proc = await asyncio.create_subprocess_exec(

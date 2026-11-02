@@ -93,7 +93,7 @@ async def write_note(course: Course, m: Material, aligned: bool, force: bool = F
         status, body = parse_output(await claude.complete(call))
         if not body:
             raise RuntimeError(f"第 {m.index} 頁模型沒有回傳內容")
-        partial = m.partial or not aligned
+        partial = m.partial
     return status if notefile.commit(path, meta(m, status, partial), body, base, force) else "kept"
 
 
