@@ -1,0 +1,12 @@
+# course content stays local: materials, rendered slides, transcripts, notes
+courses/*
+!courses/README.md
+.orch/
+.logs/
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.env*
