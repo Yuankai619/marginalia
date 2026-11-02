@@ -17,7 +17,7 @@ Marginalia turns lecture slides and recordings into study notes, with each expla
 
 The interface, generated notes, and agent replies use Traditional Chinese (Taiwan). This README is in English.
 
-> **Integration draft:** this guide covers the work in [pipeline #1](https://github.com/Yuankai619/marginalia/pull/1), [web #2](https://github.com/Yuankai619/marginalia/pull/2), [API #4](https://github.com/Yuankai619/marginalia/pull/4), and [notes #5](https://github.com/Yuankai619/marginalia/pull/5). The pipeline, web interface, note writer/reviewers, and v2 note contract are now on `main`; the API branch is not yet merged. The web interface is connected to the local API contract, while v2 rendering and static course-data export still need integration. The setup and end-to-end commands must be rechecked after integration.
+> **Current limits:** the local pipeline, reader, API, jobs, and agent chat are on `main`. V2 rendering and static course-data export still need integration; the static build currently contains frontend assets only.
 
 ## Requirements
 
@@ -120,9 +120,9 @@ Run `pnpm` commands from the repository root and `uv run marginalia ...` command
    pnpm dev
    ```
 
-5. Open <http://localhost:5173> and choose the course. With the API backend installed, click **開始生成** (Generate) and follow the job progress. The frontend sends real API requests, but the API branch is not yet on `main`; use the CLI below to process materials and generate notes until integration lands.
+5. Open <http://localhost:5173>, choose the course, click **開始生成** (Generate), and follow the job progress. When processing finishes, open a deck to read its slides and notes.
 
-The course page supports drag-and-drop uploads and **重新掃描** (Rescan) through the local API. These require the API backend; the folder-and-scan route above also works from the CLI. Processing can start CPU-intensive transcription and consume your Claude subscription allowance.
+The course page also supports drag-and-drop uploads and **重新掃描** (Rescan). The folder-and-scan route above works from the CLI too. Processing can start CPU-intensive transcription and consume your Claude subscription allowance.
 
 To process a deck from the CLI, first find its ID in `courses/operating-system/generated/manifest.json`, then run from `server/`:
 
@@ -137,7 +137,7 @@ That deck ID is an example: replace it with one in your manifest. Rendering is r
 Bind Vite to this computer's Tailscale IP, replacing the example with your own:
 
 ```sh
-pnpm dev -- --host 100.81.100.96
+MARGINALIA_ALLOWED_ORIGINS="http://localhost:5173,http://127.0.0.1:5173,http://100.81.100.96:5173" pnpm dev -- --host 100.81.100.96
 ```
 
 Open `http://100.81.100.96:5173` from another device on the same tailnet. Do not bind to `0.0.0.0` or a public IP: the development interface has no login protection and exposes course files and the local agent through its proxy. `--host` is passed only to Vite; the backend remains on `127.0.0.1:8765`. Keep `changeOrigin: true` on both `/api` and `/files` proxies so backend TrustedHost checks accept requests from the other device.
@@ -225,7 +225,7 @@ There are currently no `generate`, `review`, `export`, or `serve` CLI subcommand
 
 ## Configuration
 
-Set environment variables before starting the backend or a CLI command. These are all the `MARGINALIA_*` variables in [config.py](server/marginalia/config.py):
+Set environment variables before starting the backend or a CLI command. Backend settings come from [config.py](server/marginalia/config.py) and the Origin setting in [api.py](server/marginalia/api.py):
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -237,6 +237,9 @@ Set environment variables before starting the backend or a CLI command. These ar
 | `MARGINALIA_REVIEW_MODEL` | `sonnet` | Claude model alias for automatic reviewers. |
 | `MARGINALIA_CHAT_MODEL` | `sonnet` | Configured chat model default; the current chat handler separately defaults to `sonnet`, and an explicit request model takes precedence. |
 | `MARGINALIA_GEN_CONCURRENCY` | `4` | Concurrent note-generation/review calls. Use a positive integer; more concurrency can exhaust your allowance sooner. |
+| `MARGINALIA_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated browser origins allowed to make requests that change data. Replaces the default list; restart the server after changing it. |
+
+Origins must include the scheme, hostname, and port when needed, with no path, trailing slash, or wildcard. Surrounding whitespace and empty entries are ignored. Same-origin requests and CLI requests without an `Origin` header are always allowed. An empty setting allows only those requests. See the Tailscale example above when accessing the reader from another device.
 
 For example, from the repository root:
 
@@ -265,7 +268,7 @@ The full workflow is **scan → render → align → transcribe → generate →
 | Generate | Your logged-in Claude Code subscription | One note per slide using its image, text, nearby titles, deck outline, and aligned transcript ranges. |
 | Review | Local rules + your Claude subscription; optional Codex | Correctness, style, and coverage findings, followed by revision when needed. |
 
-The current `process` command covers the first five steps; review is separate. The UI/API job integration is still being completed.
+The `process` command and the UI pipeline job cover the first five steps. Automatic review is a separate backend job; the agent panel's review mode gives on-demand feedback.
 
 Subscription usage is not a fixed token budget. The writer makes approximately one model call per taught slide; review adds three Claude calls per note and up to two revision calls, plus an optional Codex correctness call. A 50-slide deck therefore means roughly 50 writer calls and 150 reviewer calls, with up to 100 revision calls. Automatically skipped slides reduce this. Context length, images, retries, and chat change the actual allowance used. Try one small deck first; the default writer is Opus. Speech recognition and alignment use local compute and no model-subscription tokens.
 
@@ -330,9 +333,9 @@ The course reader is designed to offer three modes:
 | Interview / 口試 | Ask one understanding question at a time, wait for your answer, then give feedback and a follow-up. |
 | Review / 審稿 | Check the current note against the slides and transcript, with concrete corrections and timestamps. |
 
-Drag across a slide to mark a region, or select text in a note/transcript, then ask about it in the panel. Choose a detected Claude or Codex login, model, and reasoning effort using the account/model controls. The panel sends the current slide and selection to the local backend and streams its response. This requires the API and agent backend; explicit mock mode uses simulated replies.
+Drag across a slide to mark a region, or select text in a note/transcript, then ask about it in the panel. Choose a detected Claude or Codex login, model, and reasoning effort using the account/model controls. The panel sends the current slide and selection to the local backend and streams its response. Explicit mock mode uses simulated replies instead of a model.
 
-The agent's supplied context belongs to the current course: its slide outline, current slide, notes, aligned transcript, and selection. It works from that course directory with read-only tools; this describes the intended course scope, not a guarantee of filesystem isolation. It does not edit your notes through chat. Conversations are stored in that course's `chats/` directory. Model requests still use the selected provider's service.
+The backend supplies context from the current course: visible slides, speaker notes, per-slide notes, transcripts (including partial transcripts), and your selection. Context is limited to 120,000 characters, prioritizing the current slide; truncation is indicated. Claude's Read/Grep/Glob tools are restricted to this course's validated paths. Codex chat has no file-reading tools and relies on the supplied context. Chat does not edit your notes. Conversations are stored in that course's `chats/` directory, and model requests use the selected provider's service.
 
 ## Deploying a static reader
 
@@ -366,6 +369,7 @@ Once you choose a deck, an agent can run `uv run marginalia process operating-sy
 | --- | --- |
 | Cannot convert PPTX / “需要 LibreOffice” | Install LibreOffice and make `soffice` or `libreoffice` visible on `PATH`. On macOS, add `/Applications/LibreOffice.app/Contents/MacOS`. A PDF input bypasses this conversion. |
 | `pdftoppm`, `pdfinfo`, or `pdftotext` not found | Install `poppler-utils` on Ubuntu/Debian or `poppler` with Homebrew, then reopen your terminal. |
+| Browser requests return 403 / “不允許此請求來源” | Set `MARGINALIA_ALLOWED_ORIGINS` to include the browser's full origin (scheme, host, and port), then restart the dev server. Use the Tailscale example above for another device. |
 | Claude login/model calls fail | Run `claude auth status`, then `claude auth login` if needed. Check subscription allowance and that the selected model is available to your account. |
 | CUDA unavailable / transcription uses CPU | A GPU is optional. With no usable CUDA device, automatic device selection uses CPU; slower processing is expected. If CUDA libraries are detected but incompatible and startup fails, fix the CTranslate2/CUDA installation; the application does not implement its own retry-on-CPU loop. |
 | CPU is saturated | Lower `MARGINALIA_WHISPER_THREADS` before starting a job. Avoid simultaneous transcription runs, including jobs in another checkout. |
