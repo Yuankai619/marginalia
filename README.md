@@ -17,7 +17,7 @@ Marginalia turns lecture slides and recordings into study notes, with each expla
 
 The interface, generated notes, and agent replies use Traditional Chinese (Taiwan). This README is in English.
 
-> **Integration draft:** this guide covers the work in [pipeline #1](https://github.com/Yuankai619/marginalia/pull/1), [web #2](https://github.com/Yuankai619/marginalia/pull/2), [API #4](https://github.com/Yuankai619/marginalia/pull/4), and [notes #5](https://github.com/Yuankai619/marginalia/pull/5). The pipeline and web interface are now on `main`; the API and notes branches are not yet merged. The web interface is connected to the local API contract, while note format v2 and static data export still need integration. The setup and end-to-end commands must be rechecked after integration.
+> **Integration draft:** this guide covers the work in [pipeline #1](https://github.com/Yuankai619/marginalia/pull/1), [web #2](https://github.com/Yuankai619/marginalia/pull/2), [API #4](https://github.com/Yuankai619/marginalia/pull/4), and [notes #5](https://github.com/Yuankai619/marginalia/pull/5). The pipeline, web interface, note writer/reviewers, and v2 note contract are now on `main`; the API branch is not yet merged. The web interface is connected to the local API contract, while v2 rendering and static course-data export still need integration. The setup and end-to-end commands must be rechecked after integration.
 
 ## Requirements
 
@@ -120,7 +120,7 @@ Run `pnpm` commands from the repository root and `uv run marginalia ...` command
    pnpm dev
    ```
 
-5. Open <http://localhost:5173> and choose the course. With the API and notes backend installed, click **開始生成** (Generate) and follow the job progress. The frontend now sends real API requests, but those backend branches are not yet on `main`; use the CLI below for the processing stages available on `main` until integration lands.
+5. Open <http://localhost:5173> and choose the course. With the API backend installed, click **開始生成** (Generate) and follow the job progress. The frontend sends real API requests, but the API branch is not yet on `main`; use the CLI below to process materials and generate notes until integration lands.
 
 The course page supports drag-and-drop uploads and **重新掃描** (Rescan) through the local API. These require the API backend; the folder-and-scan route above also works from the CLI. Processing can start CPU-intensive transcription and consume your Claude subscription allowance.
 
@@ -130,7 +130,7 @@ To process a deck from the CLI, first find its ID in `courses/operating-system/g
 uv run marginalia process operating-system --deck l1-operating-systems-a-recap
 ```
 
-That deck ID is an example: replace it with one in your manifest. Rendering is reused when current. `process` reuses completed transcripts only when their recorded source path, size, and modification time match the source file; changed sources and legacy transcripts without a fingerprint are transcribed again. Rerunning also fills in missing notes. It aligns against all course videos even when a single deck is selected. The current pipeline calls the note writer when installed; automated review is a separate job, not a step currently invoked by `process`.
+That deck ID is an example: replace it with one in your manifest. Rendering is reused when current. `process` reuses completed transcripts only when their recorded source path, size, and modification time match the source file; changed sources and legacy transcripts without a fingerprint are transcribed again. Rerunning also fills in missing notes. It aligns against all course videos even when a single deck is selected. The pipeline now includes the note writer; automated review is separate and is not invoked by `process`.
 
 ### Access from another device
 
@@ -267,7 +267,7 @@ The full workflow is **scan → render → align → transcribe → generate →
 
 The current `process` command covers the first five steps; review is separate. The UI/API job integration is still being completed.
 
-Subscription usage is not a fixed token budget. The writer makes approximately one model call per taught slide; review adds three Claude calls per note and up to one revision call, plus an optional Codex correctness call. A 50-slide deck therefore means roughly 50 writer calls and 150 reviewer calls, with up to 50 revisions. Automatically skipped slides reduce this. Context length, images, retries, and chat change the actual allowance used. Try one small deck first; the default writer is Opus. Speech recognition and alignment use local compute and no model-subscription tokens.
+Subscription usage is not a fixed token budget. The writer makes approximately one model call per taught slide; review adds three Claude calls per note and up to two revision calls, plus an optional Codex correctness call. A 50-slide deck therefore means roughly 50 writer calls and 150 reviewer calls, with up to 100 revision calls. Automatically skipped slides reduce this. Context length, images, retries, and chat change the actual allowance used. Try one small deck first; the default writer is Opus. Speech recognition and alignment use local compute and no model-subscription tokens.
 
 "Local" describes orchestration, transcription, alignment, and file storage. Writing, review, and chat send relevant course text/images to the selected model provider through the logged-in CLI.
 
@@ -276,21 +276,25 @@ Subscription usage is not a fixed token budget. The writer makes approximately o
 | State | Meaning |
 | --- | --- |
 | `generated` | Written by the note writer. |
-| `reviewed` | Automatic review has run; findings live under `generated/reviews/`. |
+| `reviewed` | Required reviewers completed and no blocking rule findings remain; findings live under `generated/reviews/`. |
 | `edited` | Saved by the user through the editor. |
 | `skipped` | The slide was not taught; the note contains a brief reason. |
 
-**Normal generation and review never overwrite `edited` notes.** If you edit Markdown directly on disk, set its frontmatter to `status: edited` yourself. Internal generation/review functions support an explicit force override; the CLI has no such flag. Review can still record findings for an edited note without changing its text.
+**Normal generation and review never overwrite `edited` notes.** A hand-written note without a `status` is protected in the same way. If you edit an existing generated Markdown file directly, change its frontmatter to `status: edited`. Writes also compare the file with the version the job started from, so a concurrent edit is kept. Internal generation/review functions support an explicit force override; the CLI has no such flag. Review can still record findings for an edited note without changing its text.
+
+A note written while alignment or transcription is incomplete carries `partial: true` and an `inputs` content fingerprint. Rerunning generation refreshes it only when its own ranges, transcript content/completeness, or pending videos change. Courses without recordings, audio-only courses, and decks with no aligned video after alignment completes get final slide-only notes.
+
+Review leaves a note as `generated` when blocking findings remain after at most two revision rounds. Notes longer than 20,000 characters receive local rule checks only and are never automatically rewritten by the reviewer. Review records include hashes of the reviewed and final note text; a record that matches neither version is stale.
 
 ### Markdown format
 
-Notes are plain Markdown with YAML frontmatter:
+Notes are plain Markdown with YAML frontmatter. This example includes a user-added image:
 
 ````markdown
 ---
 slide: 7
 title: Roles of Operating System (OS)
-status: generated
+status: edited
 sources:
   - os20260916@846-1062
 updatedAt: 2026-11-03T10:00:00+08:00
@@ -305,8 +309,8 @@ updatedAt: 2026-11-03T10:00:00+08:00
 
 ```mermaid
 flowchart TD
-  A[應用程式] --> B[作業系統]
-  B --> C[硬體]
+  A["應用程式"] --> B["作業系統"]
+  B --> C["硬體"]
 ```
 
 ![資源協調示意圖](assets/resource-flow.svg)
@@ -314,7 +318,7 @@ flowchart TD
 
 The timestamp syntax is `[mm:ss](video:<video-id>?t=<seconds>)`, also allowing an hour in the label. When the recording has a playback source, clicking a timestamp opens the corresponding video and seeks to that time. Without a source, the timestamp is shown as text.
 
-Note format v2 adds Mermaid diagrams, `==highlight==`, bold terms, GitHub alerts (`NOTE`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), GFM comparison tables, `$...$` / `$$...$$` math, and images under `notes/<deck-id>/assets/` (`.png`, `.jpg`, `.webp`, `.svg`). Image links use `assets/<filename>`; SVGs are intended to render as images rather than inline SVG. These v2 features are pending integration in this draft. See the [architecture contract](docs/architecture.md) for the merged format and the note writer's `server/marginalia/notes/style.md` once the notes branch lands.
+Note format v2 adds Mermaid diagrams, `==highlight==`, bold terms, GitHub alerts (`NOTE`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), GFM comparison tables, `$...$` / `$$...$$` math, and images under `notes/<deck-id>/assets/` (`.png`, `.jpg`, `.webp`, `.svg`). Image links use `assets/<filename>`; SVGs are intended to render as images rather than inline SVG. The writer and backend validators now follow v2; the current frontend renderer still needs Mermaid, highlight, alert, and asset-image support. Generated notes use Mermaid rather than referencing nonexistent image files; asset images are supplied by the user. See the [architecture contract](docs/architecture.md) and [note-writing rules](server/marginalia/notes/style.md).
 
 ## The agent panel
 
