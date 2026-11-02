@@ -210,3 +210,237 @@ def test_chat_modes_and_multiturn_persistence(tmp_path, monkeypatch):
         assert len(set(systems)) == 3
 
     asyncio.run(run())
+
+
+def test_claude_stream_close_closes_sdk_query(monkeypatch):
+    closed = []
+
+    async def fake(**kwargs):
+        try:
+            yield claude.AssistantMessage(
+                content=[claude.TextBlock(text="fixture")], model="fixture"
+            )
+            await asyncio.Event().wait()
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(claude, "query", fake)
+
+    async def run():
+        events = claude.stream(claude.Call("question"))
+        assert (await anext(events))["delta"] == "fixture"
+        await events.aclose()
+        assert closed
+
+    asyncio.run(run())
+
+
+def test_chat_done_is_persisted_and_concurrent_turns_keep_history(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(config, "COURSES_DIR", tmp_path)
+    course = Course("demo")
+    course.materials.mkdir(parents=True)
+    prompts = []
+
+    async def fake(call):
+        prompts.append(call.prompt)
+        await asyncio.sleep(0)
+        yield {"type": "text", "delta": "fixture answer"}
+        yield {"type": "done"}
+
+    monkeypatch.setattr(chat.claude, "stream", fake)
+
+    async def turn(message):
+        async for event in chat.stream(
+            {"course": "demo", "chatId": "same", "message": message}
+        ):
+            if event["type"] == "done":
+                data = read_json(course.chats_dir / "same.json")
+                assert data["messages"][-1]["content"] == "fixture answer"
+                assert data["messages"][-2]["content"] == message
+
+    async def run():
+        await asyncio.gather(turn("first"), turn("second"))
+        data = read_json(course.chats_dir / "same.json")
+        assert len(data["messages"]) == 4
+        assert "first" in prompts[1] and "fixture answer" in prompts[1]
+
+    asyncio.run(run())
+
+
+def test_codex_large_stdout_answer(tmp_path, monkeypatch):
+    setup_codex(tmp_path, monkeypatch)
+    create = asyncio.create_subprocess_exec
+
+    async def fake(*args, **kwargs):
+        return await create(
+            sys.executable,
+            "-c",
+            "import json,sys; sys.stdin.read(); print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'繁中'*50000}}),flush=True)",
+            **kwargs,
+        )
+
+    monkeypatch.setattr(codex_chat.asyncio, "create_subprocess_exec", fake)
+
+    async def run():
+        return [
+            e
+            async for e in codex_chat.stream("context", "codex-test", "gpt-5", "medium")
+        ]
+
+    events = asyncio.run(asyncio.wait_for(run(), 5))
+    assert events[0] == {"type": "text", "delta": "繁中" * 50000}
+
+
+def test_codex_disconnect_reaps_launcher_descendant(tmp_path, monkeypatch):
+    import os
+    import signal
+
+    setup_codex(tmp_path, monkeypatch)
+    create = asyncio.create_subprocess_exec
+    processes = []
+    pidfile = tmp_path / "child.pid"
+    script = """
+import json,os,signal,subprocess,sys,time
+child = subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)'])
+open(sys.argv[1],'w').write(str(child.pid))
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'ready'}}), flush=True)
+time.sleep(60)
+"""
+
+    async def fake(*args, **kwargs):
+        proc = await create(sys.executable, "-c", script, str(pidfile), **kwargs)
+        processes.append(proc)
+        return proc
+
+    monkeypatch.setattr(codex_chat.asyncio, "create_subprocess_exec", fake)
+
+    async def run():
+        events = codex_chat.stream("context", "codex-test", "gpt-5", "medium")
+        try:
+            await anext(events)
+            await events.aclose()
+            assert processes[0].returncode is not None
+            # A killed orphan may briefly remain as a zombie until PID 1 reaps it.
+            stat = Path(f"/proc/{pidfile.read_text()}/stat")
+            assert not stat.exists() or stat.read_text().split()[2] == "Z"
+        finally:
+            if pidfile.exists():
+                try:
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    asyncio.run(asyncio.wait_for(run(), 6))
+
+
+def test_codex_preserves_refreshed_subscription_auth(tmp_path, monkeypatch):
+    account = setup_codex(tmp_path, monkeypatch)
+    create = asyncio.create_subprocess_exec
+
+    async def fake(*args, **kwargs):
+        path = Path(kwargs["env"]["CODEX_HOME"]) / "auth.json"
+        data = json.loads(path.read_text())
+        data["tokens"]["refresh_token"] = "rotated-fixture"
+        path.write_text(json.dumps(data))
+        return await create(
+            sys.executable, "-c", "import sys; sys.stdin.read()", **kwargs
+        )
+
+    monkeypatch.setattr(codex_chat.asyncio, "create_subprocess_exec", fake)
+
+    async def run():
+        return [
+            event
+            async for event in codex_chat.stream(
+                "context", "codex-test", "gpt-5", "medium"
+            )
+        ]
+
+    asyncio.run(run())
+    assert (
+        read_json(account / "auth.json")["tokens"]["refresh_token"] == "rotated-fixture"
+    )
+
+
+def test_prompt_builder_receives_mode_and_selected_context(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(config, "COURSES_DIR", tmp_path)
+    course = Course("demo")
+    captured = []
+
+    def build(course, mode, **context):
+        captured.append((mode, context))
+        return "fixture prompt"
+
+    monkeypatch.setitem(
+        sys.modules, "marginalia.agents.prompts", SimpleNamespace(build_system=build)
+    )
+    assert "fixture prompt" in chat._system(
+        course, {"deck": "week-1", "slide": 2}, "interview"
+    )
+    assert captured == [("interview", {"deck": "week-1", "slide": 2})]
+
+
+def test_text_chat_passes_real_sdk_permission_input_validation(tmp_path, monkeypatch):
+    from claude_agent_sdk._internal import client
+
+    class ReachedTransport(Exception):
+        pass
+
+    class FixtureTransport:
+        def __init__(self, prompt, options):
+            assert hasattr(prompt, "__aiter__")
+            assert options.can_use_tool is not None
+
+        async def connect(self):
+            raise ReachedTransport
+
+    monkeypatch.setattr(client, "SubprocessCLITransport", FixtureTransport)
+
+    async def run():
+        events = claude.stream(
+            claude.Call("text only", read_root=tmp_path, tools=["Read"])
+        )
+        with pytest.raises(ReachedTransport):
+            await anext(events)
+
+    asyncio.run(run())
+
+
+def test_manifest_cannot_add_other_course_context(tmp_path, monkeypatch):
+    from marginalia.store import write_json
+
+    monkeypatch.setattr(config, "COURSES_DIR", tmp_path)
+    other = Course("other")
+    write_json(other.deck_dir("private") / "slides.json", [{"title": "outside secret"}])
+    course = Course("demo")
+    course.materials.mkdir(parents=True)
+    called = []
+
+    async def fake(call):
+        called.append(call)
+        yield {"type": "done"}
+
+    monkeypatch.setattr(chat.claude, "stream", fake)
+
+    async def run():
+        for deck in (
+            "../../../other/generated/decks/private",
+            str(other.deck_dir("private")),
+        ):
+            course.save_manifest(
+                {"decks": [{"id": deck, "title": "bad"}], "videos": []}
+            )
+            with pytest.raises(ValueError):
+                await anext(chat.stream({"course": "demo", "message": "question"}))
+        course.save_manifest(
+            {"decks": [{"id": "safe", "source": "../other/private.pdf"}], "videos": []}
+        )
+        with pytest.raises(ValueError):
+            await anext(chat.stream({"course": "demo", "message": "question"}))
+        assert not called
+
+    asyncio.run(run())

@@ -6,12 +6,15 @@ import asyncio
 import json
 import os
 import shutil
+import signal
 import tempfile
+import weakref
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 from ..llm.accounts import subscription_auth
+from ..store import write_json
 
 
 def _catalog(model: str) -> dict:
@@ -22,6 +25,7 @@ def _catalog(model: str) -> dict:
                 "slug": model,
                 "display_name": model,
                 "description": "Course chat",
+                "base_instructions": "依提供的課程上下文以繁體中文回答。沒有工具，不要嘗試讀取檔案。",
                 "supported_reasoning_levels": [],
                 "shell_type": "disabled",
                 "visibility": "list",
@@ -44,19 +48,49 @@ async def _drain(reader: asyncio.StreamReader) -> None:
 
 
 async def _stop(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is None:
+    def send(sig):
         try:
-            process.terminate()
+            if os.name == "posix":
+                os.killpg(process.pid, sig)
+            else:
+                process.send_signal(sig)
         except ProcessLookupError:
             pass
-        try:
-            await asyncio.wait_for(process.wait(), 2)
-        except TimeoutError:
-            process.kill()
-            await process.wait()
+
+    # The session belongs only to this invocation, including launcher descendants.
+    send(signal.SIGTERM)
+    try:
+        await asyncio.wait_for(process.wait(), 2)
+    except TimeoutError:
+        pass
+    finally:
+        send(signal.SIGKILL)
+        await process.wait()
+
+
+_account_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 
 async def stream(
+    prompt: str,
+    account: str,
+    model: str,
+    effort: str,
+    image: Path | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    lock = _account_locks.setdefault(account, asyncio.Lock())
+    async with lock:
+        events = _stream(prompt, account, model, effort, image)
+        try:
+            async for event in events:
+                yield event
+        finally:
+            await events.aclose()
+
+
+async def _stream(
     prompt: str,
     account: str,
     model: str,
@@ -117,6 +151,7 @@ async def stream(
             "agents.enabled": "false",
             "skills.include_instructions": "false",
             "tools.update_plan.enabled": "false",
+            "tools.experimental_request_user_input.enabled": "false",
         }
         for feature in (
             "shell_tool",
@@ -134,6 +169,8 @@ async def stream(
             "memories",
             "skill_search",
             "tool_suggest",
+            "goals",
+            "sleep_tool",
         ):
             settings[f"features.{feature}"] = "false"
         for key, value in settings.items():
@@ -147,6 +184,8 @@ async def stream(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            start_new_session=os.name == "posix",
+            limit=4 * 1024 * 1024,
         )
         assert process.stdout and process.stderr and process.stdin
         stderr = asyncio.create_task(_drain(process.stderr))
@@ -180,4 +219,9 @@ async def stream(
         finally:
             await _stop(process)
             sender.cancel()
+            stderr.cancel()
             await asyncio.gather(sender, stderr, return_exceptions=True)
+            refreshed = subscription_auth(root)
+            if refreshed and refreshed != auth and subscription_auth(home) == auth:
+                # Preserve CLI token rotation without replacing a newer external login.
+                write_json(home / "auth.json", refreshed)

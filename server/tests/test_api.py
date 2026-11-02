@@ -227,3 +227,122 @@ def test_chat_errors_do_not_expose_cli_details(tmp_path, monkeypatch):
     )
     assert "secret-token" not in response.text and "private/path" not in response.text
     assert '"type": "error"' in response.text
+
+
+def test_asgi_send_disconnect_closes_chat_before_return(tmp_path, monkeypatch):
+    import json
+
+    import pytest
+    from starlette.requests import ClientDisconnect
+
+    from marginalia import api
+
+    make_course(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "accounts", lambda: [{"id": "claude", "loggedIn": True}])
+    closed = []
+
+    async def provider(call):
+        try:
+            yield {"type": "text", "delta": "fixture"}
+            await asyncio.Event().wait()
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(api.chat.claude, "stream", provider)
+    app = create_app(JobRunner())
+    body = json.dumps({"course": "demo", "message": "question"}).encode()
+
+    async def run():
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(event):
+            if event["type"] == "http.response.body" and b'"type": "text"' in event.get(
+                "body", b""
+            ):
+                raise OSError("fixture disconnect")
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/agents/chat",
+            "raw_path": b"/api/agents/chat",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [
+                (b"host", b"testserver"),
+                (b"content-type", b"application/json"),
+            ],
+            "server": ("testserver", 80),
+            "client": ("testclient", 1234),
+        }
+        with pytest.raises((ClientDisconnect, OSError)):
+            await app(scope, receive, send)
+        assert closed == [True]
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+def test_upload_does_not_follow_internal_dangling_destination(tmp_path, monkeypatch):
+    course = make_course(tmp_path, monkeypatch)
+    target = course.materials / "untouched.txt"
+    (course.materials / "fixture.txt").symlink_to(target)
+    response = TestClient(create_app(JobRunner())).post(
+        "/api/courses/demo/upload", files={"files": ("fixture.txt", b"fixture")}
+    )
+    assert response.status_code == 200
+    assert response.json()["saved"] == ["materials/fixture-2.txt"]
+    assert not target.exists()
+
+
+def test_slow_account_checks_do_not_block_other_requests(tmp_path, monkeypatch):
+    import threading
+
+    from fastapi import HTTPException
+
+    from marginalia import api
+
+    make_course(tmp_path, monkeypatch)
+
+    async def run(path):
+        entered, release = threading.Event(), threading.Event()
+
+        def accounts():
+            entered.set()
+            assert release.wait(3)
+            return [{"id": "claude", "loggedIn": False}]
+
+        monkeypatch.setattr(api, "accounts", accounts)
+        app = create_app(JobRunner())
+        endpoint = next(
+            route.endpoint
+            for route in app.routes
+            if getattr(route, "path", None) == path
+        )
+        health = next(
+            route.endpoint
+            for route in app.routes
+            if getattr(route, "path", None) == "/api/health"
+        )
+        arguments = (
+            {"body": {"course": "demo", "message": "question"}}
+            if path.endswith("chat")
+            else {}
+        )
+        task = asyncio.create_task(endpoint(**arguments))
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            response = await asyncio.wait_for(health(), 0.5)
+            assert response["mode"] == "local" and not task.done()
+        finally:
+            release.set()
+            try:
+                await task
+            except HTTPException as exc:
+                assert exc.status_code == 422
+
+    asyncio.run(run("/api/agents/accounts"))
+    asyncio.run(run("/api/agents/chat"))

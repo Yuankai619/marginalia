@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 import tomllib
 from pathlib import Path
@@ -29,16 +30,26 @@ def _claude() -> dict[str, Any]:
     logged_in = False
     plan: str | None = None
     try:
+        from .claude import _env
+
         result = subprocess.run(
             ["claude", "auth", "status", "--json"],
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
+            env={**os.environ, **_env()},
         )
         data = json.loads(result.stdout or "{}")
+        if not isinstance(data, dict):
+            data = {}
         logged_in = bool(
             data.get("loggedIn") or data.get("logged_in") or data.get("authenticated")
+        )
+        logged_in = (
+            logged_in
+            and data.get("authMethod") == "claude.ai"
+            and data.get("apiProvider", "firstParty") == "firstParty"
         )
         plan = data.get("plan") or data.get("subscriptionType")
     except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
@@ -60,11 +71,12 @@ def _codex_dir_config(path: Path) -> dict[str, Any]:
     for name in ("config.toml", "config.json"):
         try:
             content = (path / name).read_bytes()
-            return (
+            data = (
                 tomllib.loads(content.decode())
                 if name.endswith("toml")
                 else json.loads(content)
             )
+            return data if isinstance(data, dict) else {}
         except (FileNotFoundError, OSError, ValueError, tomllib.TOMLDecodeError):
             continue
     return {}

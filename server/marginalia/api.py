@@ -6,12 +6,13 @@ import asyncio
 import json
 import mimetypes
 import re
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
 import yaml
+from anyio import CancelScope
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -170,6 +171,16 @@ class JobRequest(BaseModel):
 async def _lifespan(app: FastAPI):
     await app.state.jobs.recover()
     yield
+
+
+class ChatResponse(StreamingResponse):
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Disconnects can occur while ASGI sends a yielded chunk.
+            with CancelScope(shield=True):
+                await self.body_iterator.aclose()
 
 
 def create_app(job_runner: JobRunner = runner) -> FastAPI:
@@ -480,7 +491,7 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
 
     @app.get("/api/agents/accounts")
     async def agent_accounts():
-        return accounts()
+        return await asyncio.to_thread(accounts)
 
     @app.post("/api/agents/chat")
     async def agent_chat(body: dict[str, Any]):
@@ -520,7 +531,14 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
             ):
                 raise _error(422, "圈選範圍格式不正確")
         account_id = body.get("account", "claude")
-        account = next((item for item in accounts() if item["id"] == account_id), None)
+        account = next(
+            (
+                item
+                for item in await asyncio.to_thread(accounts)
+                if item["id"] == account_id
+            ),
+            None,
+        )
         if not account or not account.get("loggedIn"):
             raise _error(422, "指定的模型帳號未登入")
         if body.get("model") and body["model"] not in {
@@ -532,12 +550,13 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
 
         async def body_events():
             try:
-                async for event in chat.stream(body):
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                async with aclosing(chat.stream(body)) as events:
+                    async for event in events:
+                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             except Exception:  # noqa: BLE001 - never expose raw CLI errors or credentials
                 yield f"data: {json.dumps({'type': 'error', 'message': '助教執行失敗，請確認本機登入後重試'}, ensure_ascii=False)}\n\n"
 
-        return StreamingResponse(
+        return ChatResponse(
             body_events(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},

@@ -11,6 +11,7 @@ import base64
 import os
 import tempfile
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,9 +46,19 @@ class Call:
 
 
 def _env() -> dict[str, str]:
-    # blank everything that could move billing or traffic off the subscription login
-    blank = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
-    return {**dict.fromkeys(blank, ""), "CLAUDE_CODE_ENTRYPOINT": "marginalia"}
+    env = {
+        key: ""
+        for key in os.environ
+        if key.startswith(("ANTHROPIC_", "CLAUDE_CODE_USE_"))
+    }
+    env.update(
+        ANTHROPIC_API_KEY="",
+        ANTHROPIC_AUTH_TOKEN="",
+        ANTHROPIC_BASE_URL="",
+        CLAUDE_CODE_OAUTH_TOKEN="",
+        CLAUDE_CODE_ENTRYPOINT="marginalia",
+    )
+    return env
 
 
 def _read_target(root: Path, name: str, data: dict) -> None:
@@ -147,7 +158,7 @@ async def _messages(c: Call):
 
 async def stream(c: Call) -> AsyncIterator[dict]:
     """Yields {"type":"text","delta"} / {"type":"tool","title","detail"} / {"type":"done","usage"}."""
-    prompt = _messages(c) if c.images else c.prompt
+    prompt = _messages(c) if c.images or c.read_root else c.prompt
     with tempfile.TemporaryDirectory(prefix="marginalia-claude-") as tmp:  # 0700: not readable by other users
         opts = _options(c)
         if c.system:
@@ -156,28 +167,29 @@ async def stream(c: Call) -> AsyncIterator[dict]:
             path = Path(tmp) / "system.md"
             path.write_text(c.system, "utf-8")
             opts.system_prompt = {"type": "file", "path": str(path)}
-        async for event in _events(prompt, opts):
-            yield event
+        async with aclosing(_events(prompt, opts)) as events:
+            async for event in events:
+                yield event
 
 
 async def _events(prompt, opts: ClaudeAgentOptions) -> AsyncIterator[dict]:
-    async for msg in query(prompt=prompt, options=opts):
-        if isinstance(msg, AssistantMessage):
-            for b in msg.content:
-                if isinstance(b, TextBlock):
-                    yield {"type": "text", "delta": b.text}
-                elif isinstance(b, ToolUseBlock):
-                    detail = b.input.get("file_path") or b.input.get("pattern") or ""
-                    yield {
-                        "type": "tool",
-                        "title": b.name,
-                        "detail": os.path.basename(str(detail)) if detail else "",
-                    }
-        elif isinstance(msg, ResultMessage):
-            if msg.is_error:
-                raise RuntimeError(msg.result or "Claude 回傳錯誤")
-            yield {"type": "done", "usage": msg.usage, "cost": msg.total_cost_usd}
-
+    async with aclosing(query(prompt=prompt, options=opts)) as messages:
+        async for msg in messages:
+            if isinstance(msg, AssistantMessage):
+                for b in msg.content:
+                    if isinstance(b, TextBlock):
+                        yield {"type": "text", "delta": b.text}
+                    elif isinstance(b, ToolUseBlock):
+                        detail = b.input.get("file_path") or b.input.get("pattern") or ""
+                        yield {
+                            "type": "tool",
+                            "title": b.name,
+                            "detail": os.path.basename(str(detail)) if detail else "",
+                        }
+            elif isinstance(msg, ResultMessage):
+                if msg.is_error:
+                    raise RuntimeError(msg.result or "Claude 回傳錯誤")
+                yield {"type": "done", "usage": msg.usage, "cost": msg.total_cost_usd}
 
 async def complete(c: Call) -> str:
     parts = [e["delta"] async for e in stream(c) if e["type"] == "text"]

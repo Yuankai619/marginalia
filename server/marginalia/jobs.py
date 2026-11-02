@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import align, ingest, slides, transcribe
-from .course_access import check_course
+from . import align, config, ingest, slides, transcribe
+from .course_access import check_course, confined
 from .store import Course, list_courses, read_json, write_json
 
 Job = dict[str, Any]
@@ -32,7 +33,10 @@ class JobRunner:
         self.cancel_requested: set[str] = set()
 
     def _path(self, course: Course, job_id: str) -> Path:
-        return course.gen / "jobs" / f"{job_id}.json"
+        if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+            raise ValueError("工作 ID 格式不正確")
+        confined(course.dir, config.COURSES_DIR)
+        return confined(course.gen / "jobs" / f"{job_id}.json", course.dir)
 
     def _save(self, job: Job) -> None:
         write_json(self._path(Course(job["course"]), job["id"]), job)
@@ -53,7 +57,16 @@ class JobRunner:
                 continue
             for path in (course.gen / "jobs").glob("*.json"):
                 job = read_json(path)
-                if not isinstance(job, dict) or not job.get("id"):
+                if (
+                    not isinstance(job, dict)
+                    or not isinstance(job.get("id"), str)
+                    or not re.fullmatch(r"[a-f0-9]{32}", job["id"])
+                    or path.stem != job["id"]
+                    or job.get("course") != course.id
+                    or not isinstance(job.get("state"), str)
+                    or job.get("state")
+                    not in {"queued", "running", "done", "failed", "cancelled"}
+                ):
                     continue
                 if job.get("state") in {"queued", "running"}:
                     job.update(
@@ -144,10 +157,20 @@ class JobRunner:
             job["steps"][0].update(state="running", message="執行中")
             await self._publish(job)
             if job["kind"] in CPU_KINDS:
-                async with self.cpu:
-                    self._checkpoint(job)
-                    # cancel() is cooperative: the owner waits for its real worker.
-                    await self._execute(job, progress)
+                execution = asyncio.create_task(self._execute_reserved(job, progress))
+                try:
+                    await asyncio.shield(execution)
+                except asyncio.CancelledError:
+                    self.cancel_requested.add(job_id)
+                    while not execution.done():
+                        try:
+                            await asyncio.shield(execution)
+                        except asyncio.CancelledError:
+                            continue
+                    # The reservation belongs to execution, even during shutdown.
+                    if not execution.cancelled():
+                        execution.result()
+                    raise
             else:
                 await self._execute(job, progress)
             self._checkpoint(job)
@@ -166,6 +189,13 @@ class JobRunner:
             await self._publish(job)
             self.tasks.pop(job_id, None)
             self.cancel_requested.discard(job_id)
+
+    async def _execute_reserved(
+        self, job: Job, progress: Callable[[float, str], None]
+    ) -> None:
+        async with self.cpu:
+            self._checkpoint(job)
+            await self._execute(job, progress)
 
     async def _execute(self, job: Job, progress: Callable[[float, str], None]) -> None:
         course = Course(job["course"])
@@ -236,7 +266,7 @@ class JobRunner:
                     course,
                     deck,
                     progress=lambda f, m, n=n: progress((n - 1 + f) / len(decks), m),
-                    **params.get("options", {}),
+                    **{**params.get("options", {}), "slides": params.get("slides")},
                 )
 
 

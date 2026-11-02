@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import tempfile
 import uuid
+import weakref
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -118,12 +120,31 @@ def _history_prompt(messages: list[dict[str, Any]], message: str) -> str:
     return f"先前對話：\n{history}\n\n使用者：{message}" if history else message
 
 
+_locks: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
+
+
 async def stream(request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
     course = Course(request["course"])
-    check_course(course)
     chat_id = request.get("chatId") or uuid.uuid4().hex
     if not isinstance(chat_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", chat_id):
         raise ValueError("對話 ID 格式不正確")
+    key = (str(course.dir.resolve()), chat_id)
+    lock = _locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        events = _stream({**request, "chatId": chat_id})
+        try:
+            async for event in events:
+                yield event
+        finally:
+            await events.aclose()
+
+
+async def _stream(request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+    course = Course(request["course"])
+    check_course(course)
+    chat_id = request["chatId"]
     path = course.chats_dir / f"{chat_id}.json"
     saved = read_json(
         path,
@@ -146,6 +167,7 @@ async def stream(request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
     ]
     yield {"type": "start", "chatId": chat_id}
     response = ""
+    done = None
     image = _region_image(course, context)
     events = None
     try:
@@ -174,13 +196,16 @@ async def stream(request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
             if event["type"] == "text":
                 response += event["delta"]
             if event["type"] == "done":
-                event = {**event, "chatId": chat_id}
-            yield event
+                done = {**event, "chatId": chat_id}
+            else:
+                yield event
         saved["messages"].append(
             {"role": "assistant", "content": response, "createdAt": _now()}
         )
         saved["updatedAt"] = _now()
+        check_course(course)
         write_json(path, saved)
+        yield done or {"type": "done", "chatId": chat_id}
     finally:
         if events:
             await events.aclose()

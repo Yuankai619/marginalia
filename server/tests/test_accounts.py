@@ -50,3 +50,35 @@ def test_codex_only_accepts_subscription_auth(tmp_path, monkeypatch):
     results = accounts._codex()
     assert [a["loggedIn"] for a in results] == [False] * 8 + [True]
     assert "fake-key" not in repr(results)
+
+
+def test_claude_only_accepts_subscription_and_clears_provider_env(monkeypatch):
+    from types import SimpleNamespace
+
+    from marginalia.llm.claude import _env
+
+    for key in (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ):
+        monkeypatch.setenv(key, "fixture")
+        assert _env()[key] == ""
+    method = "api_key"
+
+    def status(*args, **kwargs):
+        assert kwargs["env"]["ANTHROPIC_AUTH_TOKEN"] == ""
+        return SimpleNamespace(
+            stdout=json.dumps(
+                {"loggedIn": True, "authMethod": method, "apiProvider": "firstParty"}
+            )
+        )
+
+    monkeypatch.setattr(accounts.subprocess, "run", status)
+    assert not accounts._claude()["loggedIn"]
+    method = "claude.ai"
+    assert accounts._claude()["loggedIn"]
