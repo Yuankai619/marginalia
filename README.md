@@ -1,5 +1,7 @@
 # Marginalia
 
+[![CI](https://github.com/Yuankai619/marginalia/actions/workflows/ci.yml/badge.svg)](https://github.com/Yuankai619/marginalia/actions/workflows/ci.yml)
+
 投影片在左、筆記在右。把上課簡報和錄影丟進來，Marginalia 會自動對齊「哪段影片在講哪一頁」、在本機轉出逐字稿，
 再用你自己電腦上已登入的 Claude（訂閱額度，不用 API key）逐頁寫成筆記，每一段都附可以跳回影片的時間點。
 
