@@ -1,0 +1,103 @@
+"""Discover locally logged-in model CLIs without exposing credentials."""
+
+from __future__ import annotations
+
+import base64
+import json
+import subprocess
+import tomllib
+from pathlib import Path
+from typing import Any
+
+
+def _masked_email(token: str) -> str | None:
+    try:
+        payload = token.split(".")[1] + "=" * (-len(token.split(".")[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload))
+        email = data.get("email") or data.get("https://api.openai.com/profile", {}).get(
+            "email"
+        )
+        if not isinstance(email, str) or "@" not in email:
+            return None
+        local, domain = email.split("@", 1)
+        return f"{local[:2]}***@{domain}"
+    except (IndexError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def _claude() -> dict[str, Any]:
+    logged_in = False
+    plan: str | None = None
+    try:
+        result = subprocess.run(
+            ["claude", "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        data = json.loads(result.stdout or "{}")
+        logged_in = bool(
+            data.get("loggedIn") or data.get("logged_in") or data.get("authenticated")
+        )
+        plan = data.get("plan") or data.get("subscriptionType")
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        pass
+    return {
+        "id": "claude",
+        "provider": "claude",
+        "label": "Claude",
+        "loggedIn": logged_in,
+        "models": [
+            {"id": x, "label": x.capitalize()} for x in ("opus", "sonnet", "haiku")
+        ],
+        "efforts": ["low", "medium", "high", "xhigh", "max"],
+        **({"plan": plan} if plan else {}),
+    }
+
+
+def _codex_dir_config(path: Path) -> dict[str, Any]:
+    for name in ("config.toml", "config.json"):
+        try:
+            content = (path / name).read_bytes()
+            return (
+                tomllib.loads(content.decode())
+                if name.endswith("toml")
+                else json.loads(content)
+            )
+        except (FileNotFoundError, OSError, ValueError, tomllib.TOMLDecodeError):
+            continue
+    return {}
+
+
+def _codex() -> list[dict[str, Any]]:
+    home = Path.home()
+    dirs = [home / ".codex", *sorted(home.glob(".codex-*"))]
+    accounts = []
+    for path in dirs:
+        auth = path / "auth.json"
+        if not auth.is_file():
+            continue
+        try:
+            data = json.loads(auth.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        token = data.get("tokens", {}).get("id_token") or data.get("id_token") or ""
+        cfg = _codex_dir_config(path)
+        model = cfg.get("model") or cfg.get("model_name") or "gpt-5"
+        label = _masked_email(token) or path.name.lstrip(".")
+        accounts.append(
+            {
+                "id": path.name.lstrip("."),
+                "provider": "codex",
+                "label": label,
+                "loggedIn": True,
+                "models": [{"id": model, "label": model}],
+                "efforts": ["low", "medium", "high"],
+            }
+        )
+    return accounts
+
+
+def accounts() -> list[dict[str, Any]]:
+    return [_claude(), *_codex()]
