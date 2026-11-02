@@ -75,26 +75,73 @@ See the docstring at the top of `server/marginalia/store.py`. Key points:
 
 ## Note format
 
-```markdown
+Format v2 (2026-11-03): notes are written for students with no background, so they lean on structure, diagrams
+and highlights.
+
+````markdown
 ---
 slide: 7
 title: Roles of Operating System (OS)
 status: generated        # generated | reviewed | edited | skipped
 sources:
   - os20260916@846-1062   # video@start-end seconds the slide was on screen
+partial: true            # optional: written while the transcript or alignment was still pending
+inputs: 3f9a1c0b2d4e       # with partial: fingerprint of the ranges and transcript lines this slide used
 updatedAt: 2026-11-03T10:00:00+08:00
 ---
 
-正文……老師用「中介層」來形容作業系統 [14:06](video:os20260916?t=846)。
+> [!IMPORTANT]
+> 作業系統是應用程式和硬體之間的一層軟體，==應用程式要用硬體都得經過它== [14:28](video:os20260916?t=868)。
+
+## 三個角色
+
+- **Transparency**（透明性）：寫程式的人不用管硬體怎麼分配……
+
+```mermaid
+flowchart TD
+  A["應用程式"] --> B["作業系統"] --> C["硬體"]
+```
 
 ## 補充
 ……
+````
+
+- Status: a note without a `status` (a hand-written file) counts as `edited`. Generation never overwrites `edited`
+  notes unless the user forces it, and every generated/reviewed write is a compare-and-swap on the file content.
+- `status: skipped` + one line when the teacher did not talk about the slide.
+- A course without recordings (or with audio only), or a deck that no aligned video shows, gets final slide-only
+  notes (no `partial`). A partial note is regenerated only when its `inputs` fingerprint changes. It is computed
+  from content (this slide's ranges and transcript lines, whether they are complete, which videos are still pending),
+  not file times, so the pipeline re-writing an identical alignment does not make every run call the model again.
+- Notes longer than the review limit (20,000 chars) are only rule-checked, never rewritten by the reviewer.
+- Timestamp links are plain markdown links with the `video:` scheme: `[mm:ss](video:<videoId>?t=<seconds>)`
+  (`h:mm:ss` past an hour; `t` is whole seconds and the label is that same value). The UI renders them as chips
+  that seek the player.
+- Writing rules for notes live in `server/marginalia/notes/style.md` (owned by the notes card).
+
+Markdown extensions (frontend and backend contract):
+
+| Use | Syntax | Rendering |
+| --- | --- | --- |
+| Flowchart, architecture, state, sequence diagrams | ```` ```mermaid ```` block: `flowchart`, `sequenceDiagram`, `stateDiagram-v2`, `classDiagram`, `block-beta`; node text may be zh-TW | mermaid → SVG, follows light/dark theme; on a syntax error show the source plus the error instead of breaking the page; click to enlarge |
+| Images (drawings, screenshots, SVG diagrams) | `![caption](assets/<file>.svg)`, files in `notes/<deck>/assets/`, png/jpg/webp/svg | `<img>` (SVG always as img, never inline, so no scripts), caption shown below; click to enlarge |
+| Highlight | `==text==` | `<mark>` |
+| Bold | `**term**` (a term where it is first defined, the key words of a conclusion) | bold |
+| Callouts | GitHub alerts `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]` | blocks labelled 補充說明, 小技巧, 重點, 注意, 易混淆 |
+| Comparison | GFM table | table, scrolls sideways on narrow screens |
+| Math | `$...$`, `$$...$$` | KaTeX |
+| Self-check answers | `<details><summary>答案</summary>…</details>` | collapsible; the only raw HTML allowed, everything else is sanitized |
+
+Review records (`generated/reviews/<deck>/NNN.json`):
+
+```json
+{ "findings": [ { "reviewer": "correctness", "severity": "high", "quote": "…", "problem": "…", "fix": "…" } ],
+  "reviewedHash": "…", "noteHash": "…", "revised": true, "unresolved": [], "reviewedAt": "…", "errors": {} }
 ```
 
-- Timestamp links are plain markdown links with the `video:` scheme: `[mm:ss](video:<videoId>?t=<seconds>)`.
-  The UI renders them as chips that seek the player.
-- `status: skipped` + one line when the teacher did not talk about the slide.
-- Writing rules for notes live in `server/marginalia/notes/style.md` (owned by the notes card).
+`reviewedHash` is `sha256(body.strip())[:16]` of the text the reviewers read, `noteHash` of the text the review
+left on disk; `findings` describe the former, `unresolved` (high/medium rule findings still open) the latter. Ignore
+a record whose hashes match neither the current note body.
 
 ## Alignment format (`generated/alignment.json`)
 

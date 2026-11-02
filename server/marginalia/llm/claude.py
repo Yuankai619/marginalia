@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import os
+import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,7 +37,9 @@ class Call:
 
 
 def _env() -> dict[str, str]:
-    return {"ANTHROPIC_API_KEY": "", "CLAUDE_CODE_ENTRYPOINT": "marginalia"}
+    # blank everything that could move billing or traffic off the subscription login
+    blank = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+    return {**dict.fromkeys(blank, ""), "CLAUDE_CODE_ENTRYPOINT": "marginalia"}
 
 
 def _options(c: Call) -> ClaudeAgentOptions:
@@ -44,8 +47,9 @@ def _options(c: Call) -> ClaudeAgentOptions:
         "system_prompt": c.system or None,
         "model": c.model,
         "cwd": str(c.cwd) if c.cwd else None,
+        "tools": c.tools,  # the only tools that exist for this call; [] means none at all
         "allowed_tools": c.tools,
-        "disallowed_tools": ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"],
+        "disallowed_tools": ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Agent"],
         "permission_mode": "default",
         "max_turns": c.max_turns,
         "env": _env(),
@@ -68,7 +72,20 @@ async def _messages(c: Call):
 async def stream(c: Call) -> AsyncIterator[dict]:
     """Yields {"type":"text","delta"} / {"type":"tool","title","detail"} / {"type":"done","usage"}."""
     prompt = _messages(c) if c.images else c.prompt
-    async for msg in query(prompt=prompt, options=_options(c)):
+    with tempfile.TemporaryDirectory(prefix="marginalia-claude-") as tmp:  # 0700: not readable by other users
+        opts = _options(c)
+        if c.system:
+            # chat system prompts carry the course outline and can pass the 128 KiB argv limit; a file also keeps
+            # transcripts and notes out of `ps`
+            path = Path(tmp) / "system.md"
+            path.write_text(c.system, "utf-8")
+            opts.system_prompt = {"type": "file", "path": str(path)}
+        async for event in _events(prompt, opts):
+            yield event
+
+
+async def _events(prompt, opts: ClaudeAgentOptions) -> AsyncIterator[dict]:
+    async for msg in query(prompt=prompt, options=opts):
         if isinstance(msg, AssistantMessage):
             for b in msg.content:
                 if isinstance(b, TextBlock):
