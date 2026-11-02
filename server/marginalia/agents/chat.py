@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 import os
 import re
 import tempfile
@@ -15,8 +13,10 @@ from typing import Any
 
 from PIL import Image
 
+from ..course_access import check_course
 from ..llm import claude
 from ..store import Course, read_json, write_json
+from . import codex_chat
 
 
 def _now() -> str:
@@ -32,11 +32,30 @@ def _note(course: Course, deck: str | None, slide: int | None) -> str:
         return ""
 
 
-def _system(course: Course, context: dict[str, Any]) -> str:
+MODES = {
+    "qa": "回答課程問題，說明推理依據並引用課程來源。",
+    "interview": "進行口試練習，一次只問一題，等學生回答再追問並提供回饋。",
+    "review": "審查目前筆記，指出錯誤、缺漏與可改善處，依課程證據提出具體修改建議。",
+}
+
+
+def _system(course: Course, context: dict[str, Any], mode: str = "qa") -> str:
+    return MODES[mode] + "\n" + _course_context(course, context, mode)
+
+
+def _course_context(course: Course, context: dict[str, Any], mode: str) -> str:
     try:
         from .prompts import build_system
 
-        return build_system(course, context)
+        return build_system(
+            course,
+            mode,
+            **{
+                k: context[k]
+                for k in ("deck", "slide", "selection", "region")
+                if k in context
+            },
+        )
     except ImportError:
         deck, slide = context.get("deck"), context.get("slide")
         titles = [
@@ -99,48 +118,9 @@ def _history_prompt(messages: list[dict[str, Any]], message: str) -> str:
     return f"先前對話：\n{history}\n\n使用者：{message}" if history else message
 
 
-async def _codex(
-    prompt: str, course: Course, account: str, model: str, effort: str
-) -> AsyncIterator[dict[str, Any]]:
-    home = Path.home() / (".codex" if account == "codex" else f".{account}")
-    env = {**os.environ, "CODEX_HOME": str(home)}
-    process = await asyncio.create_subprocess_exec(
-        "codex",
-        "exec",
-        "--json",
-        "--sandbox",
-        "read-only",
-        "-C",
-        str(course.dir),
-        "-m",
-        model,
-        "-c",
-        f"model_reasoning_effort={effort}",
-        prompt,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    assert process.stdout is not None
-    async for raw in process.stdout:
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        kind = event.get("type", "")
-        if kind in {"item.completed", "response.output_text.delta"}:
-            item = event.get("item", {})
-            text = event.get("delta") or item.get("text") or item.get("content")
-            if isinstance(text, str):
-                yield {"type": "text", "delta": text}
-    code = await process.wait()
-    if code:
-        raise RuntimeError("Codex 執行失敗")
-    yield {"type": "done"}
-
-
 async def stream(request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
     course = Course(request["course"])
+    check_course(course)
     chat_id = request.get("chatId") or uuid.uuid4().hex
     if not isinstance(chat_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", chat_id):
         raise ValueError("對話 ID 格式不正確")
@@ -154,6 +134,9 @@ async def stream(request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
             "messages": [],
         },
     )
+    mode = saved.get("mode", "qa")
+    if mode not in MODES:
+        raise ValueError("聊天模式不正確")
     messages = saved.get("messages", [])
     context = request.get("context") or {}
     prompt = _history_prompt(messages, request["message"])
@@ -164,26 +147,28 @@ async def stream(request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
     yield {"type": "start", "chatId": chat_id}
     response = ""
     image = _region_image(course, context)
+    events = None
     try:
         if request.get("account", "claude") == "claude":
             call = claude.Call(
                 prompt=prompt,
-                system=_system(course, context),
+                system=_system(course, context, mode),
                 images=[image] if image else [],
                 model=request.get("model", "sonnet"),
                 effort=request.get("effort"),
                 cwd=course.dir,
                 tools=["Read", "Grep", "Glob"],
                 max_turns=8,
+                read_root=course.dir,
             )
             events = claude.stream(call)
         else:
-            events = _codex(
-                _system(course, context) + "\n\n" + prompt,
-                course,
+            events = codex_chat.stream(
+                _system(course, context, mode) + "\n\n" + prompt,
                 request["account"],
                 request.get("model", "gpt-5"),
                 request.get("effort", "medium"),
+                image,
             )
         async for event in events:
             if event["type"] == "text":
@@ -197,5 +182,7 @@ async def stream(request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         saved["updatedAt"] = _now()
         write_json(path, saved)
     finally:
+        if events:
+            await events.aclose()
         if image:
             image.unlink(missing_ok=True)

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import align, ingest, slides, transcribe
+from .course_access import check_course
 from .store import Course, list_courses, read_json, write_json
 
 Job = dict[str, Any]
@@ -28,6 +29,7 @@ class JobRunner:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.listeners: set[Listener] = set()
         self.cpu = asyncio.Lock()
+        self.cancel_requested: set[str] = set()
 
     def _path(self, course: Course, job_id: str) -> Path:
         return course.gen / "jobs" / f"{job_id}.json"
@@ -45,6 +47,10 @@ class JobRunner:
     async def recover(self) -> None:
         """Load completed jobs and fail jobs interrupted by a server restart."""
         for course in list_courses():
+            try:
+                check_course(course)
+            except ValueError:
+                continue
             for path in (course.gen / "jobs").glob("*.json"):
                 job = read_json(path)
                 if not isinstance(job, dict) or not job.get("id"):
@@ -69,6 +75,7 @@ class JobRunner:
         return job.copy() if job else None
 
     async def create(self, course: Course, kind: str, **params: Any) -> Job:
+        check_course(course)
         if kind not in {
             "pipeline",
             "scan",
@@ -106,20 +113,24 @@ class JobRunner:
         job = self.jobs.get(job_id)
         if not job or job["state"] in {"done", "failed", "cancelled"}:
             return self.get(job_id)
-        task = self.tasks.get(job_id)
-        if task:
-            task.cancel()
-        else:
+        if job_id in self.cancel_requested:
+            return self.get(job_id)
+        self.cancel_requested.add(job_id)
+        if job["state"] == "queued":
             job.update(state="cancelled", finishedAt=_now(), message="已取消")
-            await self._publish(job)
+            job["steps"][0].update(state="cancelled", message="已取消")
+        else:
+            job["message"] = "取消中，等待目前步驟結束"
+        await self._publish(job)
         return self.get(job_id)
+
+    def _checkpoint(self, job: Job) -> None:
+        if job["id"] in self.cancel_requested:
+            raise asyncio.CancelledError
 
     async def _run(self, job_id: str) -> None:
         job = self.jobs[job_id]
         loop = asyncio.get_running_loop()
-        job.update(state="running", startedAt=_now(), message="執行中")
-        job["steps"][0].update(state="running", message="執行中")
-        await self._publish(job)
 
         def progress(fraction: float, message: str) -> None:
             job["progress"] = max(0.0, min(1.0, fraction))
@@ -128,18 +139,18 @@ class JobRunner:
             loop.call_soon_threadsafe(asyncio.create_task, self._publish(job.copy()))
 
         try:
+            self._checkpoint(job)
+            job.update(state="running", startedAt=_now(), message="執行中")
+            job["steps"][0].update(state="running", message="執行中")
+            await self._publish(job)
             if job["kind"] in CPU_KINDS:
                 async with self.cpu:
-                    execution = asyncio.create_task(self._execute(job, progress))
-                    try:
-                        await asyncio.shield(execution)
-                    except asyncio.CancelledError:
-                        # A blocking worker thread cannot be killed safely.  Keep the
-                        # CPU reservation until it returns so no second heavy job runs.
-                        await asyncio.shield(execution)
-                        raise
+                    self._checkpoint(job)
+                    # cancel() is cooperative: the owner waits for its real worker.
+                    await self._execute(job, progress)
             else:
                 await self._execute(job, progress)
+            self._checkpoint(job)
             job.update(state="done", progress=1.0, message="完成", finishedAt=_now())
             job["steps"][0].update(state="done", progress=1.0, message="完成")
         except asyncio.CancelledError:
@@ -154,9 +165,12 @@ class JobRunner:
         finally:
             await self._publish(job)
             self.tasks.pop(job_id, None)
+            self.cancel_requested.discard(job_id)
 
     async def _execute(self, job: Job, progress: Callable[[float, str], None]) -> None:
         course = Course(job["course"])
+        check_course(course)
+        self._checkpoint(job)
         params = job["params"]
         kind = job["kind"]
         if kind == "scan":
@@ -164,6 +178,7 @@ class JobRunner:
         elif kind == "render":
             decks = params.get("decks") or [d["id"] for d in course.manifest()["decks"]]
             for n, deck in enumerate(decks, 1):
+                self._checkpoint(job)
                 await asyncio.to_thread(
                     slides.render_deck,
                     course,
@@ -171,14 +186,23 @@ class JobRunner:
                     lambda f, m, n=n: progress((n - 1 + f) / len(decks), m),
                 )
         elif kind == "align":
-            await asyncio.to_thread(
-                align.align_course, course, progress, params.get("videos")
-            )
+            videos = params.get("videos") or [
+                v["id"] for v in course.manifest()["videos"]
+            ]
+            for n, video in enumerate(videos, 1):
+                self._checkpoint(job)
+                await asyncio.to_thread(
+                    align.align_course,
+                    course,
+                    lambda f, m, n=n: progress((n - 1 + f) / len(videos), m),
+                    [video],
+                )
         elif kind == "transcribe":
             videos = params.get("videos") or [
                 v["id"] for v in course.manifest()["videos"]
             ]
             for n, video in enumerate(videos, 1):
+                self._checkpoint(job)
                 await asyncio.to_thread(
                     transcribe.transcribe_video,
                     course,
@@ -206,6 +230,7 @@ class JobRunner:
                 ) from exc
             decks = params.get("decks") or [d["id"] for d in course.manifest()["decks"]]
             for n, deck in enumerate(decks, 1):
+                self._checkpoint(job)
                 await asyncio.to_thread(
                     fn,
                     course,

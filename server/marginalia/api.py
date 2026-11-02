@@ -12,13 +12,14 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import yaml
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import ingest
 from .agents import chat
+from .course_access import check_course, confined
 from .jobs import JobRunner, runner
 from .llm.accounts import accounts
 from .store import (
@@ -39,6 +40,7 @@ def _error(status: int, detail: str) -> HTTPException:
 def _course(course_id: str) -> Course:
     try:
         course = Course(course_id)
+        check_course(course)
     except ValueError as exc:
         raise _error(404, "找不到課程") from exc
     if not course.exists():
@@ -47,6 +49,8 @@ def _course(course_id: str) -> Course:
 
 
 def _deck(course: Course, deck: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[\w.-]+", deck) or deck.startswith("."):
+        raise _error(404, "找不到簡報")
     value = course.deck(deck)
     if not value:
         raise _error(404, "找不到簡報")
@@ -173,6 +177,20 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
     app.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"]
     )
+
+    @app.middleware("http")
+    async def check_origin(request: Request, call_next):
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            origin = request.headers.get("origin")
+            allowed = {
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                str(request.base_url).rstrip("/"),
+            }
+            if origin is not None and origin not in allowed:
+                return JSONResponse({"detail": "不允許此請求來源"}, status_code=403)
+        return await call_next(request)
+
     app.state.jobs = job_runner
 
     @app.get("/api/health")
@@ -183,6 +201,10 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
     async def courses():
         result = []
         for course in list_courses():
+            try:
+                course = _course(course.id)
+            except HTTPException:
+                continue
             manifest = course.manifest()
             result.append(
                 {
@@ -201,6 +223,7 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
         course_id = body.id or slugify(body.title)
         try:
             course = Course(course_id)
+            check_course(course)
         except ValueError as exc:
             raise _error(422, "課程 ID 格式不正確") from exc
         if course.exists():
@@ -242,7 +265,7 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
     async def upload(
         course_id: str,
         files: Annotated[list[UploadFile], File()],
-        folder: str | None = None,
+        folder: Annotated[str | None, Form()] = None,
     ):
         course = _course(course_id)
         parts = Path(folder or "").parts
@@ -252,6 +275,10 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
         ):
             raise _error(422, "資料夾路徑不正確")
         target = course.materials.joinpath(*parts)
+        try:
+            confined(target, course.materials)
+        except ValueError as exc:
+            raise _error(422, "資料夾路徑不正確") from exc
         target.mkdir(parents=True, exist_ok=True)
         saved = []
         for upload_file in files:
@@ -261,10 +288,17 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
                 raise _error(422, "檔名不正確")
             destination = target / name
             stem, suffix, count = destination.stem, destination.suffix, 2
-            while destination.exists():
-                destination = target / f"{stem}-{count}{suffix}"
-                count += 1
-            with destination.open("wb") as output:
+            while True:
+                try:
+                    confined(destination, course.materials)
+                    output = destination.open("xb")
+                    break
+                except FileExistsError:
+                    destination = target / f"{stem}-{count}{suffix}"
+                    count += 1
+                except ValueError as exc:
+                    raise _error(422, "檔案路徑不正確") from exc
+            with output:
                 while chunk := await upload_file.read(1024 * 1024):
                     output.write(chunk)
             saved.append(str(destination.relative_to(course.dir)))
@@ -454,6 +488,11 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
             if not isinstance(body.get(key), str) or not body[key].strip():
                 raise _error(422, "聊天請求不完整")
         course = _course(body["course"])
+        if (
+            not isinstance(body.get("mode", "qa"), str)
+            or body.get("mode", "qa") not in chat.MODES
+        ):
+            raise _error(422, "聊天模式不正確")
         context = body.get("context") or {}
         if not isinstance(context, dict):
             raise _error(422, "聊天情境格式不正確")
@@ -495,8 +534,8 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
             try:
                 async for event in chat.stream(body):
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            except Exception as exc:  # noqa: BLE001 - turn local CLI errors into an SSE event
-                yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+            except Exception:  # noqa: BLE001 - never expose raw CLI errors or credentials
+                yield f"data: {json.dumps({'type': 'error', 'message': '助教執行失敗，請確認本機登入後重試'}, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(
             body_events(),

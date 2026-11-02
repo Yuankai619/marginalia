@@ -95,3 +95,135 @@ def test_job_transitions_to_done(tmp_path, monkeypatch):
     job = asyncio.run(run())
     assert job["state"] == "done"
     assert job["progress"] == 1.0
+
+
+def test_symlink_course_root_is_rejected(tmp_path, monkeypatch):
+    course = make_course(tmp_path, monkeypatch)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret")
+    (course.dir.parent / "alias").symlink_to(outside, target_is_directory=True)
+    client = TestClient(create_app(JobRunner()))
+    assert client.get("/files/alias/secret.txt").status_code == 404
+    assert client.put("/api/courses/alias", json={"title": "bad"}).status_code == 404
+    assert "alias" not in [c["id"] for c in client.get("/api/courses").json()]
+
+
+def test_course_subtree_symlinks_cannot_read_or_write(tmp_path, monkeypatch):
+    import pytest
+
+    course = make_course(tmp_path, monkeypatch)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "001.md").write_text("secret")
+    client = TestClient(create_app(JobRunner()))
+    for path in (course.notes_dir / "week-1", course.chats_dir, course.gen / "reviews"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(outside, target_is_directory=True)
+        assert client.get("/api/courses/demo/decks/week-1/notes/1").status_code == 404
+        assert (
+            client.put(
+                "/api/courses/demo/decks/week-1/notes/1", json={"markdown": "bad"}
+            ).status_code
+            == 404
+        )
+        assert client.get("/api/courses/demo/chats").status_code == 404
+        path.unlink()
+    for path in (course.materials / "linked", course.materials / "dangling.pdf"):
+        path.symlink_to(outside / "missing.pdf")
+        response = client.post(
+            "/api/courses/demo/upload", files={"files": ("dangling.pdf", b"bad")}
+        )
+        assert response.status_code == 404
+        assert not (outside / "missing.pdf").exists()
+        path.unlink()
+    assert (outside / "001.md").read_text() == "secret"
+    with pytest.raises(ValueError):
+        from marginalia.course_access import confined
+
+        confined(course.dir / "../outside", course.dir)
+
+
+def test_upload_uses_multipart_folder_and_preserves_existing_file(
+    tmp_path, monkeypatch
+):
+    course = make_course(tmp_path, monkeypatch)
+    client = TestClient(create_app(JobRunner()))
+    for body in (b"one", b"two"):
+        response = client.post(
+            "/api/courses/demo/upload",
+            data={"folder": "week-1"},
+            files={"files": ("fixture.txt", body)},
+        )
+        assert response.status_code == 200
+        assert response.json()["saved"][0].startswith("materials/week-1/")
+    assert (course.materials / "week-1/fixture.txt").read_bytes() == b"one"
+    assert (course.materials / "week-1/fixture-2.txt").read_bytes() == b"two"
+
+
+def test_side_effect_origins_are_checked_before_handlers(tmp_path, monkeypatch):
+    make_course(tmp_path, monkeypatch)
+    client = TestClient(create_app(JobRunner()))
+    for origin in (
+        "https://evil.example",
+        "null",
+        "http://localhost:9999",
+        "http://localhost:5173.evil.example",
+    ):
+        for method, path in (
+            ("POST", "/api/courses/demo/scan"),
+            ("POST", "/api/jobs/missing/cancel"),
+            ("PUT", "/api/courses/demo"),
+            ("DELETE", "/api/courses/demo"),
+        ):
+            assert (
+                client.request(method, path, headers={"Origin": origin}).status_code
+                == 403
+            )
+    for origin in (
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://testserver",
+    ):
+        assert (
+            client.post(
+                "/api/courses/demo/scan", headers={"Origin": origin}
+            ).status_code
+            == 200
+        )
+    assert (
+        client.get(
+            "/api/health", headers={"Origin": "https://evil.example"}
+        ).status_code
+        == 200
+    )
+
+
+def test_invalid_chat_mode_rejected(tmp_path, monkeypatch):
+    make_course(tmp_path, monkeypatch)
+    client = TestClient(create_app(JobRunner()))
+    assert (
+        client.post(
+            "/api/agents/chat",
+            json={"course": "demo", "message": "test", "mode": "bad"},
+        ).status_code
+        == 422
+    )
+
+
+def test_chat_errors_do_not_expose_cli_details(tmp_path, monkeypatch):
+    from marginalia import api
+
+    make_course(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "accounts", lambda: [{"id": "claude", "loggedIn": True}])
+
+    async def fail(body):
+        raise RuntimeError("secret-token /private/path")
+        yield
+
+    monkeypatch.setattr(api.chat, "stream", fail)
+    response = TestClient(create_app(JobRunner())).post(
+        "/api/agents/chat", json={"course": "demo", "message": "test"}
+    )
+    assert "secret-token" not in response.text and "private/path" not in response.text
+    assert '"type": "error"' in response.text

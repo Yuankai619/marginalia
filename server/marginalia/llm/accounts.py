@@ -70,6 +70,24 @@ def _codex_dir_config(path: Path) -> dict[str, Any]:
     return {}
 
 
+def subscription_auth(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads((path / "auth.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("OPENAI_API_KEY"):
+        return None
+    if data.get("auth_mode") not in {None, "chatgpt"}:
+        return None
+    tokens = data.get("tokens")
+    if not isinstance(tokens, dict) or not all(
+        isinstance(tokens.get(key), str) and tokens[key].strip()
+        for key in ("id_token", "access_token", "refresh_token")
+    ):
+        return None
+    return data
+
+
 def _codex() -> list[dict[str, Any]]:
     home = Path.home()
     dirs = [home / ".codex", *sorted(home.glob(".codex-*"))]
@@ -78,11 +96,8 @@ def _codex() -> list[dict[str, Any]]:
         auth = path / "auth.json"
         if not auth.is_file():
             continue
-        try:
-            data = json.loads(auth.read_text("utf-8"))
-        except (OSError, json.JSONDecodeError):
-            data = {}
-        token = data.get("tokens", {}).get("id_token") or data.get("id_token") or ""
+        data = subscription_auth(path)
+        token = data["tokens"]["id_token"] if data else ""
         cfg = _codex_dir_config(path)
         model = cfg.get("model") or cfg.get("model_name") or "gpt-5"
         label = _masked_email(token) or path.name.lstrip(".")
@@ -91,7 +106,7 @@ def _codex() -> list[dict[str, Any]]:
                 "id": path.name.lstrip("."),
                 "provider": "codex",
                 "label": label,
-                "loggedIn": True,
+                "loggedIn": data is not None,
                 "models": [{"id": model, "label": model}],
                 "efforts": ["low", "medium", "high"],
             }
