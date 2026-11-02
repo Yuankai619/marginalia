@@ -52,9 +52,10 @@ def _course(course_id: str) -> Course:
 
 
 def _deck(course: Course, deck: str) -> dict[str, Any]:
-    if not re.fullmatch(r"[\w.-]+", deck) or deck.startswith("."):
-        raise _error(404, "找不到簡報")
-    value = course.deck(deck)
+    try:
+        value = course.deck(deck)
+    except ValueError as exc:
+        raise _error(404, "找不到簡報") from exc
     if not value:
         raise _error(404, "找不到簡報")
     return value
@@ -84,9 +85,8 @@ def _note_response(course: Course, deck: str, index: int) -> dict[str, Any] | No
 
 
 def _safe_file(course: Course, path: str) -> Path:
-    candidate = (course.dir / path).resolve()
     try:
-        candidate.relative_to(course.dir.resolve())
+        candidate = course.path(path)
     except ValueError as exc:
         raise _error(404, "找不到檔案") from exc
     if not candidate.is_file():
@@ -374,6 +374,8 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
 
     @app.get("/api/courses/{course_id}/decks/{deck}/notes/{index}")
     async def get_note(course_id: str, deck: str, index: int):
+        if index < 1:
+            raise _error(422, "投影片頁碼不正確")
         course = _course(course_id)
         _deck(course, deck)
         meta, markdown = _parse_note(course.note_path(deck, index))
@@ -385,6 +387,8 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
 
     @app.put("/api/courses/{course_id}/decks/{deck}/notes/{index}")
     async def put_note(course_id: str, deck: str, index: int, body: NoteUpdate):
+        if index < 1:
+            raise _error(422, "投影片頁碼不正確")
         course = _course(course_id)
         _deck(course, deck)
         path = course.note_path(deck, index)
@@ -410,7 +414,11 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
         to: float | None = None,
     ):
         course = _course(course_id)
-        if not course.video(video):
+        try:
+            value = course.video(video)
+        except ValueError as exc:
+            raise _error(404, "找不到影片") from exc
+        if not value:
             raise _error(404, "找不到影片")
         complete = course.transcript(video)
         partial = complete is None
@@ -431,9 +439,14 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
     @app.put("/api/courses/{course_id}/alignment/segments")
     async def update_segment(course_id: str, body: SegmentUpdate):
         course = _course(course_id)
-        if body.start < 0 or body.end <= body.start or not course.video(body.video):
+        try:
+            valid_video = course.video(body.video)
+            valid_deck = course.deck(body.deck) if body.deck else None
+        except ValueError as exc:
+            raise _error(422, "對齊片段不正確") from exc
+        if body.start < 0 or body.end <= body.start or not valid_video:
             raise _error(422, "對齊片段不正確")
-        if body.deck and not course.deck(body.deck):
+        if body.deck and not valid_deck:
             raise _error(422, "找不到簡報")
         data = course.alignment()
         data.setdefault("segments", []).append({**body.model_dump(), "manual": True})

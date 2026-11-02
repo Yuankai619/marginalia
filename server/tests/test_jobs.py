@@ -12,7 +12,15 @@ def test_repeated_cancel_keeps_cpu_until_worker_finishes(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "COURSES_DIR", tmp_path)
     course = Course("demo")
     course.materials.mkdir(parents=True)
-    course.save_manifest({"decks": [{"id": "one"}, {"id": "two"}], "videos": []})
+    course.save_manifest(
+        {
+            "decks": [
+                {"id": "one", "source": "materials/one.pdf"},
+                {"id": "two", "source": "materials/two.pdf"},
+            ],
+            "videos": [],
+        }
+    )
     entered, release = threading.Event(), threading.Event()
     calls = []
 
@@ -162,5 +170,84 @@ def test_repeated_owner_task_cancel_keeps_cpu_reservation(tmp_path, monkeypatch)
             assert calls == ["one", "two"]
         finally:
             release.set()
+
+    asyncio.run(run())
+
+
+def test_pipeline_job_uses_merged_process_signature_and_progress(course, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from marginalia import pipeline
+
+    course.save_manifest(
+        {"decks": [{"id": "one", "source": "materials/one.pdf"}], "videos": []}
+    )
+    rendered, generated, messages = [], [], []
+    monkeypatch.setattr(pipeline.ingest, "scan", lambda _: course.manifest())
+    monkeypatch.setattr(
+        pipeline.slides, "render_deck", lambda _, deck, progress: rendered.append(deck)
+    )
+    monkeypatch.setattr(pipeline.align, "align_course", lambda *_: {"segments": []})
+    monkeypatch.setitem(
+        sys.modules,
+        "marginalia.notes.generate",
+        SimpleNamespace(generate_deck=lambda _, deck, progress: generated.append(deck)),
+    )
+
+    async def run():
+        runner = JobRunner()
+
+        async def listener(job):
+            messages.append(job["message"])
+
+        runner.listeners.add(listener)
+        job = await runner.create(
+            course, "pipeline", decks=["one"], videos=None, slides=None, options={}
+        )
+        await runner.tasks[job["id"]]
+        await asyncio.sleep(0)
+        result = runner.get(job["id"])
+        assert result["state"] == "done" and result["progress"] == 1
+        assert rendered == ["one"] and generated == ["one"]
+        assert "掃描教材" in messages and "處理完成" in messages
+
+    asyncio.run(run())
+
+
+def test_pipeline_cancel_stops_before_next_merged_step(course, monkeypatch):
+    from marginalia import pipeline
+
+    course.save_manifest(
+        {"decks": [{"id": "one", "source": "materials/one.pdf"}], "videos": []}
+    )
+    entered, release = threading.Event(), threading.Event()
+    aligned = []
+    monkeypatch.setattr(pipeline.ingest, "scan", lambda _: course.manifest())
+
+    def render(_, deck, progress):
+        entered.set()
+        assert release.wait(5)
+        progress(1, "fixture finished")
+
+    monkeypatch.setattr(pipeline.slides, "render_deck", render)
+    monkeypatch.setattr(pipeline.align, "align_course", lambda *_: aligned.append(True))
+
+    async def run():
+        runner = JobRunner()
+        job = await runner.create(
+            course, "pipeline", decks=["one"], videos=None, slides=None, options={}
+        )
+        task = runner.tasks[job["id"]]
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            await runner.cancel(job["id"])
+            await runner.cancel(job["id"])
+            assert runner.cpu.locked() and not task.done()
+        finally:
+            release.set()
+            await task
+        assert runner.get(job["id"])["state"] == "cancelled"
+        assert not aligned and not runner.cpu.locked()
 
     asyncio.run(run())

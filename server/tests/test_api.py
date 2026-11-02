@@ -438,3 +438,38 @@ def test_invalid_origin_configuration_fails_at_startup(monkeypatch):
         monkeypatch.setenv("MARGINALIA_ALLOWED_ORIGINS", value)
         with pytest.raises(ValueError, match="MARGINALIA_ALLOWED_ORIGINS"):
             create_app(JobRunner())
+
+
+def test_store_validation_errors_are_http_errors(tmp_path, monkeypatch):
+    course = make_course(tmp_path, monkeypatch)
+    manifest = course.manifest()
+    manifest["videos"] = [{"id": "clip", "source": "materials/clip.mp4"}]
+    course.save_manifest(manifest)
+    client = TestClient(create_app(JobRunner()))
+    for deck in ("week.1", "-week-1"):
+        assert client.get(f"/api/courses/demo/decks/{deck}").status_code == 404
+        assert client.get(f"/api/courses/demo/decks/{deck}/notes/1").status_code == 404
+    assert (
+        client.get("/api/courses/demo/videos/clip.invalid/transcript").status_code
+        == 404
+    )
+    for index in (0, -1):
+        response = client.get(f"/api/courses/demo/decks/week-1/notes/{index}")
+        assert response.status_code == 422 and isinstance(
+            response.json()["detail"], str
+        )
+        assert (
+            client.put(
+                f"/api/courses/demo/decks/week-1/notes/{index}",
+                json={"markdown": "fixture"},
+            ).status_code
+            == 422
+        )
+    for body in (
+        {"video": "clip.invalid", "start": 0, "end": 1},
+        {"video": "clip", "deck": "week.1", "start": 0, "end": 1},
+    ):
+        response = client.put("/api/courses/demo/alignment/segments", json=body)
+        assert response.status_code == 422 and isinstance(
+            response.json()["detail"], str
+        )

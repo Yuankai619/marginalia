@@ -432,13 +432,20 @@ def test_manifest_cannot_add_other_course_context(tmp_path, monkeypatch):
             "../../../other/generated/decks/private",
             str(other.deck_dir("private")),
         ):
-            course.save_manifest(
-                {"decks": [{"id": deck, "title": "bad"}], "videos": []}
+            write_json(
+                course.gen / "manifest.json",
+                {
+                    "decks": [
+                        {"id": deck, "source": "materials/fixture.pdf", "title": "bad"}
+                    ],
+                    "videos": [],
+                },
             )
             with pytest.raises(ValueError):
                 await anext(chat.stream({"course": "demo", "message": "question"}))
-        course.save_manifest(
-            {"decks": [{"id": "safe", "source": "../other/private.pdf"}], "videos": []}
+        write_json(
+            course.gen / "manifest.json",
+            {"decks": [{"id": "safe", "source": "../other/private.pdf"}], "videos": []},
         )
         with pytest.raises(ValueError):
             await anext(chat.stream({"course": "demo", "message": "question"}))

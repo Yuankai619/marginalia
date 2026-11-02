@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import align, config, ingest, slides, transcribe
-from .course_access import check_course, confined
+from .course_access import check_course
 from .store import Course, list_courses, read_json, write_json
 
 Job = dict[str, Any]
@@ -35,8 +35,7 @@ class JobRunner:
     def _path(self, course: Course, job_id: str) -> Path:
         if not re.fullmatch(r"[a-f0-9]{32}", job_id):
             raise ValueError("工作 ID 格式不正確")
-        confined(course.dir, config.COURSES_DIR)
-        return confined(course.gen / "jobs" / f"{job_id}.json", course.dir)
+        return course.path(config.GENERATED, "jobs", f"{job_id}.json")
 
     def _save(self, job: Job) -> None:
         write_json(self._path(Course(job["course"]), job["id"]), job)
@@ -241,7 +240,17 @@ class JobRunner:
                 )
         elif kind == "pipeline":
             module = importlib.import_module("marginalia.pipeline")
-            await asyncio.to_thread(module.process, course, **params)
+
+            def pipeline_progress(fraction: float, message: str) -> None:
+                self._checkpoint(job)
+                progress(fraction, message)
+
+            await asyncio.to_thread(
+                module.process,
+                course,
+                decks=params.get("decks"),
+                progress=pipeline_progress,
+            )
         else:
             module_name = (
                 "marginalia.notes.generate"
