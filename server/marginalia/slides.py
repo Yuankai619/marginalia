@@ -45,7 +45,12 @@ def _pdf_pages(pdf: Path) -> int:
 
 
 def _pdf_text(pdf: Path, page: int) -> str:
-    r = subprocess.run(["pdftotext", "-f", str(page), "-l", str(page), "-layout", str(pdf), "-"], capture_output=True, text=True)
+    r = subprocess.run(
+        ["pdftotext", "-f", str(page), "-l", str(page), "-layout", str(pdf), "-"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
     return r.stdout.strip()
 
 
@@ -87,10 +92,11 @@ def render_deck(course: Course, deck_id: str, progress=lambda f, m: None) -> lis
     deck = course.deck(deck_id)
     if not deck:
         raise KeyError(deck_id)
-    src = course.dir / deck["source"]
+    src = course.source_path(deck["source"])
     ddir = course.deck_dir(deck_id)
-    (ddir / "slides").mkdir(parents=True, exist_ok=True)
-    (ddir / "thumbs").mkdir(parents=True, exist_ok=True)
+    course.deck_path(deck_id, "deck.pdf")
+    course.deck_path(deck_id, "slides").mkdir(parents=True, exist_ok=True)
+    course.deck_path(deck_id, "thumbs").mkdir(parents=True, exist_ok=True)
 
     progress(0.05, "轉成 PDF")
     pdf = _to_pdf(src, ddir)
@@ -105,24 +111,24 @@ def render_deck(course: Course, deck_id: str, progress=lambda f, m: None) -> lis
         pngs = sorted(Path(tmp).glob("p-*.png"), key=lambda p: int(p.stem.split("-")[-1]))
         for i, png in enumerate(pngs, 1):
             im = Image.open(png).convert("RGB")
-            im.save(ddir / "slides" / f"{slide_name(i)}.webp", quality=88)
+            im.save(course.deck_path(deck_id, "slides", f"{slide_name(i)}.webp"), quality=88)
             th = im.copy()
             th.thumbnail((config.THUMB_WIDTH, config.THUMB_WIDTH))
-            th.save(ddir / "thumbs" / f"{slide_name(i)}.webp", quality=80)
+            th.save(course.deck_path(deck_id, "thumbs", f"{slide_name(i)}.webp"), quality=80)
             progress(0.3 + 0.6 * i / max(n, 1), f"投影片 {i}/{n}")
 
     meta = _pptx_slides(src) if src.suffix.lower() == ".pptx" else None
     if meta is not None and len(meta) != n:
         meta = None  # page count drifted (e.g. animations exported as pages); trust the PDF
     slides = []
-    with Image.open(ddir / "slides" / f"{slide_name(1)}.webp") as first:
+    with Image.open(course.deck_path(deck_id, "slides", f"{slide_name(1)}.webp")) as first:
         w, h = first.size
     for i in range(1, n + 1):
         m = meta[i - 1] if meta else {}
         text = m.get("text") or _pdf_text(pdf, i)
         title = m.get("title") or next((ln.strip() for ln in text.splitlines() if ln.strip()), f"Slide {i}")
         slides.append({"index": i, "title": title, "text": text, "speakerNotes": m.get("speakerNotes", "")})
-    write_json(ddir / "slides.json", slides)
+    write_json(course.deck_path(deck_id, "slides.json"), slides)
 
     man = course.manifest()
     for d in man["decks"]:

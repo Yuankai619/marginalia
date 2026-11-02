@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config, media
-from .store import Course, slugify
+from .store import Course, confined_path, slugify
 
 DATE_PATTERNS = [
     (re.compile(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)"), lambda m: (int(m[1]), int(m[2]), int(m[3]))),
@@ -40,7 +40,7 @@ def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
     root = dest.resolve()
     for member in zf.infolist():
         target = (dest / member.filename).resolve()
-        if not str(target).startswith(str(root)):
+        if Path(member.filename).is_absolute() or not target.is_relative_to(root):
             raise RuntimeError(f"zip 內有不安全的路徑：{member.filename}")
     zf.extractall(dest)
 
@@ -48,9 +48,10 @@ def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
 def unpack_zips(course: Course) -> list[str]:
     done = []
     for z in sorted(course.materials.rglob("*.zip")):
+        z = confined_path(course.materials, z)
         if "_extracted" in z.parts:
             continue
-        dest = course.materials / "_extracted" / z.stem
+        dest = course.path(config.MATERIALS, "_extracted", z.stem)
         if dest.exists():
             continue
         with zipfile.ZipFile(z) as zf:
@@ -75,10 +76,15 @@ def scan(course: Course) -> dict:
 
     decks, videos = [], []
     taken: set[str] = set()
-    files = [p for p in course.materials.rglob("*") if p.is_file() and not any(part.startswith(".") for part in p.parts)]
+    files = []
+    for path in course.materials.rglob("*"):
+        course.source_path(str(path.relative_to(course.dir)))
+        if path.is_file() and not any(part.startswith(".") for part in path.parts):
+            files.append(path)
     for p in sorted(files, key=lambda p: natural_key(p.name)):
         ext = p.suffix.lower()
         rel = str(p.relative_to(course.dir))
+        p = course.source_path(rel)
         prev = old_by_src.get(rel, {})
         if ext in config.DECK_EXTS:
             if p.name.startswith("~$"):
@@ -89,10 +95,11 @@ def scan(course: Course) -> dict:
                 "source": rel,
                 "date": guess_date(p.stem, p.stat().st_mtime),
                 "size": p.stat().st_size,
+                "mtimeNs": p.stat().st_mtime_ns,
             }
             taken.add(entry["id"])
             for k in ("slideCount", "width", "height", "rendered"):
-                if k in prev and prev.get("size") == entry["size"]:
+                if k in prev and all(prev.get(key) == entry[key] for key in ("size", "mtimeNs")):
                     entry[k] = prev[k]
             decks.append(entry)
         elif ext in config.VIDEO_EXTS or ext in config.AUDIO_EXTS:
@@ -102,10 +109,12 @@ def scan(course: Course) -> dict:
                 "source": rel,
                 "date": guess_date(p.stem, p.stat().st_mtime),
                 "size": p.stat().st_size,
+                "mtimeNs": p.stat().st_mtime_ns,
                 "kind": "audio" if ext in config.AUDIO_EXTS else "video",
             }
             taken.add(entry["id"])
-            entry["duration"] = prev.get("duration") if prev.get("size") == entry["size"] and prev.get("duration") else round(media.duration(p), 2)
+            unchanged = all(prev.get(key) == entry[key] for key in ("size", "mtimeNs"))
+            entry["duration"] = prev.get("duration") if unchanged and prev.get("duration") else round(media.duration(p), 2)
             videos.append(entry)
 
     decks.sort(key=lambda d: natural_key(d["title"]))

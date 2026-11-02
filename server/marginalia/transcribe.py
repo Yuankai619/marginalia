@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from pathlib import Path
 
 from . import config, media
-from .store import Course, write_json
+from .store import Course, read_json, unlink_output, write_json
 
 Progress = Callable[[float, str], None]
 
@@ -28,17 +27,21 @@ def _vocabulary(course: Course, limit: int = 600) -> str:
 
 
 def transcribe_video(course: Course, video_id: str, progress: Progress | None = None, model_name: str | None = None) -> dict:
-    from faster_whisper import WhisperModel
-
     progress = progress or (lambda f, m: None)
     v = course.video(video_id)
     if not v:
         raise KeyError(video_id)
-    vdir = course.video_dir(video_id)
-    wav = vdir / "audio.wav"
-    if not wav.exists():
+    fingerprint = course.fingerprint(v)
+    wav = course.video_output_path(video_id, "audio.wav")
+    wav_meta = course.video_output_path(video_id, "audio.source.json")
+    transcript = course.video_output_path(video_id, "transcript.json")
+    partial = course.video_output_path(video_id, "transcript.partial.json")
+    if not wav.exists() or read_json(wav_meta) != fingerprint:
         progress(0.0, "抽出音訊")
-        media.extract_audio(course.dir / v["source"], wav)
+        media.extract_audio(course.source_path(v["source"]), wav, root=course.gen)
+        write_json(wav_meta, fingerprint)
+
+    from faster_whisper import WhisperModel
 
     model_name = model_name or config.WHISPER_MODEL
     progress(0.01, f"載入 Whisper 模型 {model_name}")
@@ -66,10 +69,11 @@ def transcribe_video(course: Course, video_id: str, progress: Progress | None = 
             eta = (time.time() - started) / max(frac, 1e-3) * (1 - frac)
             progress(0.02 + 0.97 * frac, f"轉錄中 {s.end / 60:.0f}/{total / 60:.0f} 分鐘，約剩 {eta / 60:.0f} 分鐘")
             # partial saves let the UI show text while the job runs
-            write_json(vdir / "transcript.partial.json", {"segments": segs})
-    out = {"model": model_name, "language": info.language, "duration": total, "segments": segs}
-    write_json(vdir / "transcript.json", out)
-    (vdir / "transcript.partial.json").unlink(missing_ok=True)
-    wav.unlink(missing_ok=True)
+            write_json(partial, {"segments": segs, "sourceFingerprint": fingerprint})
+    out = {"model": model_name, "language": info.language, "duration": total, "segments": segs, "sourceFingerprint": fingerprint}
+    write_json(transcript, out)
+    unlink_output(partial)
+    unlink_output(wav)
+    unlink_output(wav_meta)
     progress(1.0, f"完成：{len(segs)} 段")
     return out
