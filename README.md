@@ -17,7 +17,7 @@ Marginalia turns lecture slides and recordings into study notes, with each expla
 
 The interface, generated notes, and agent replies use Traditional Chinese (Taiwan). This README is in English.
 
-> **Integration draft:** this guide covers the work in [pipeline #1](https://github.com/Yuankai619/marginalia/pull/1), [web #2](https://github.com/Yuankai619/marginalia/pull/2), [API #4](https://github.com/Yuankai619/marginalia/pull/4), and [notes #5](https://github.com/Yuankai619/marginalia/pull/5). These features are not all on `main` yet. Some web interactions are still previews, note format v2 is being implemented, and static data export is not wired up. The setup and end-to-end commands must be rechecked after integration.
+> **Integration draft:** this guide covers the work in [pipeline #1](https://github.com/Yuankai619/marginalia/pull/1), [web #2](https://github.com/Yuankai619/marginalia/pull/2), [API #4](https://github.com/Yuankai619/marginalia/pull/4), and [notes #5](https://github.com/Yuankai619/marginalia/pull/5). The pipeline is now on `main`; the other features are not all merged yet. Some web interactions are still previews, note format v2 is being implemented, and static data export is not wired up. The setup and end-to-end commands must be rechecked after integration.
 
 ## Requirements
 
@@ -130,7 +130,7 @@ To process a deck from the CLI, first find its ID in `courses/operating-system/g
 uv run marginalia process operating-system --deck l1-operating-systems-a-recap
 ```
 
-That deck ID is an example: replace it with one in your manifest. Rendering and completed transcripts are reused by `process`; rerunning it fills in missing notes. It aligns against all course videos even when a single deck is selected. The current pipeline calls the note writer when installed; automated review is a separate job, not a step currently invoked by `process`.
+That deck ID is an example: replace it with one in your manifest. Rendering is reused when current. `process` reuses completed transcripts only when their recorded source path, size, and modification time match the source file; changed sources and legacy transcripts without a fingerprint are transcribed again. Rerunning also fills in missing notes. It aligns against all course videos even when a single deck is selected. The current pipeline calls the note writer when installed; automated review is a separate job, not a step currently invoked by `process`.
 
 ## Course files
 
@@ -184,7 +184,7 @@ ZIPs are unpacked once into `materials/_extracted/<zip-name>/` during scanning; 
 
 ## CLI reference
 
-Run these commands from `server/`. This reference was checked against the pipeline branch's actual `--help` output.
+Run these commands from `server/`. This reference was checked against the merged CLI's actual `--help` output on `main`.
 
 ```sh
 uv run marginalia --help
@@ -209,7 +209,7 @@ Every subcommand takes a required `course` directory ID. `-h` / `--help` prints 
 - `render` converts selected decks to slide images, thumbnails, and extracted text.
 - `align` matches selected videos against rendered course slides and saves time ranges. Manual corrections survive re-alignment.
 - `transcribe` runs local Whisper for selected videos. It can be expensive; unlike `process`, calling this command directly does not skip an already completed transcript.
-- `process` scans, renders missing deck outputs, aligns videos, transcribes missing recordings associated with the selected decks, and generates notes. Other decks must already be rendered to participate in a cross-deck match when only one deck is selected.
+- `process` scans, renders missing or invalidated deck outputs, aligns videos, transcribes recordings without a current transcript, and generates notes. With `--deck`, transcription includes recordings matched to those decks, audio-only recordings, and videos whose deck membership is unknown. Other decks must already be rendered to participate in a cross-deck match when only one deck is selected.
 
 There are currently no `generate`, `review`, `export`, or `serve` CLI subcommands, and no CLI `--force`, `--model`, or `--device` options. Note generation/review are also available as backend jobs; do not confuse job kinds with CLI commands.
 
@@ -373,7 +373,7 @@ pnpm check
 (cd server && uv run ruff check . && uv run pytest -q)
 ```
 
-[CI](.github/workflows/ci.yml) runs on PRs and pushes to `main`: backend dependency sync, Ruff, and pytest; frontend install, check, and build on Node 22 when the web package exists. The current bootstrap workflow tolerates existing backend lint failures and an empty test suite, and skips the web job before scaffolding is merged. These exceptions do not mean the full application has passed end-to-end validation.
+[CI](.github/workflows/ci.yml) runs on PRs and pushes to `main`: backend dependency sync, Ruff, and pytest; frontend install, check, and build on Node 22 when the web package exists. Backend lint failures fail CI. The bootstrap workflow treats an empty test suite as a skip and skips web checks/build before scaffolding is merged. The current backend has a test suite; these skips do not mean the full application has passed end-to-end validation.
 
 ## License
 
