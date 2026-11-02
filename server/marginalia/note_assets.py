@@ -57,11 +57,29 @@ def _split(name: str) -> tuple[str, str]:
     return "", name
 
 
+_CSS_ESCAPE = re.compile(r"\\(?:([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\r\n|\n|(.))", re.DOTALL)
+# Ways CSS can load something other than url(): at-rules and image functions that take plain strings.
+_CSS_LOADERS = ("@import", "expression(", "javascript:", "image-set(", "image(", "src(", "cross-fade(", "element(")
+
+
+def _css_unescape(text: str) -> str:
+    """Resolve CSS escapes (`@\\69mport` is `@import`) so checks see what the browser will see."""
+
+    def char(match: re.Match[str]) -> str:
+        if match.group(1):
+            code = int(match.group(1), 16)
+            return chr(code) if 0 < code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF else "\ufffd"
+        return match.group(2) or ""
+
+    return _CSS_ESCAPE.sub(char, text)
+
+
 def _safe_css(text: str) -> bool:
-    squashed = re.sub(r"[\s\x00-\x1f\\]+", "", text).lower()
-    if "@import" in squashed or "expression(" in squashed or "javascript:" in squashed:
+    plain = _css_unescape(text)
+    squashed = re.sub(r"[\s\x00-\x1f]+", "", plain).lower()
+    if any(loader in squashed for loader in _CSS_LOADERS):
         return False
-    return all(target.startswith("#") for target in _URL.findall(text))
+    return all(target.startswith("#") for target in _URL.findall(plain))
 
 
 # The only DOCTYPEs drawing tools write; anything else (internal subsets, entities, other DTDs) is refused
@@ -74,6 +92,11 @@ _STANDARD_DOCTYPE = re.compile(
 
 def _check_svg(data: bytes) -> None:
     data = data.removeprefix(b"\xef\xbb\xbf")
+    # ElementTree drops processing instructions, so `<?xml-stylesheet href=…?>` would pass the tree checks and
+    # stay in the saved bytes. Only the XML declaration itself is allowed.
+    declaration = re.match(rb"\s*<\?xml\s[^?]*\?>", data)
+    if b"<?" in data[declaration.end() if declaration else 0 :]:
+        raise AssetError("SVG 不能包含 <?…?> 處理指令（例如外部樣式表）")
     if re.search(rb"<!\s*entity", data, re.IGNORECASE):
         raise AssetError("SVG 不能包含實體宣告")
     if re.search(rb"<!\s*doctype", _STANDARD_DOCTYPE.sub(b"", data, count=1), re.IGNORECASE):

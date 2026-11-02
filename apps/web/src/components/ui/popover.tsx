@@ -28,7 +28,7 @@ export function PopoverContent({
       >
         <PopoverPrimitive.Popup
           className={cn(
-            "w-72 origin-(--transform-origin) rounded-[8px] border border-border bg-popover p-3 text-foreground shadow-floating outline-hidden",
+            "w-72 max-h-(--available-height) origin-(--transform-origin) overflow-y-auto overscroll-contain rounded-[8px] border border-border bg-popover p-3 text-foreground shadow-floating outline-hidden",
             "transition-[transform,scale,opacity] data-ending-style:scale-95 data-ending-style:opacity-0 data-starting-style:scale-95 data-starting-style:opacity-0",
             className,
           )}

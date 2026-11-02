@@ -36,6 +36,7 @@ from .store import (
     write_text,
 )
 
+SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
 _ASSET_UPLOAD = re.compile(r"/api/courses/[^/]+/decks/[^/]+/assets")
 
 
@@ -491,6 +492,9 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
         course = _course(course_id)
         file = _safe_file(course, path)
         headers = {"X-Content-Type-Options": "nosniff"}
+        if file.suffix.lower() == ".svg":
+            # Opened on its own, an SVG is a document: let it load nothing from anywhere.
+            headers["Content-Security-Policy"] = SVG_CSP
         return (
             _range_response(file, request)
             if file.suffix.lower() in {".mp4", ".mkv", ".mov", ".webm", ".m4v"}

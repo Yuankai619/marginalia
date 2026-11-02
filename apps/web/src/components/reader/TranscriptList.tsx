@@ -1,6 +1,7 @@
 import { Captions } from "lucide-react";
 import { EmptyState } from "@/components/ui/states";
 import type { Transcript, VideoTime } from "@/lib/types";
+import { cn } from "@/lib/utils";
 import { formatTime } from "@/lib/video";
 
 export function TranscriptList({
@@ -8,9 +9,12 @@ export function TranscriptList({
   loading,
   onTime,
   canPlay,
+  compact,
 }: {
   parts: (Transcript & { video: string })[];
   loading: boolean;
+  /** Smaller empty state and text, for the strip under the slide. */
+  compact?: boolean;
   onTime: (target: VideoTime) => void;
   canPlay: (video: string) => boolean;
 }) {
@@ -22,7 +26,7 @@ export function TranscriptList({
         description={
           loading ? undefined : "錄影還沒轉成文字，或老師沒有在這頁停留。"
         }
-        className="py-12"
+        className={compact ? "py-6" : "py-12"}
       />
     );
   return (
@@ -41,7 +45,14 @@ export function TranscriptList({
           >
             {formatTime(part.start)}
           </button>
-          <p className="min-w-0 text-[13.5px] leading-relaxed">{part.text}</p>
+          <p
+            className={cn(
+              "min-w-0 leading-relaxed",
+              compact ? "text-[13px]" : "text-[13.5px]",
+            )}
+          >
+            {part.text}
+          </p>
         </li>
       ))}
     </ol>

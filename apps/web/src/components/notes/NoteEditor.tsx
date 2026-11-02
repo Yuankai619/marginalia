@@ -131,7 +131,7 @@ export function NoteEditor({
   source: NoteSource;
   /** Where the lecture player is right now, for「插入目前時間」. */
   playback: VideoTime | null;
-  uploadImage: (file: File) => Promise<string>;
+  uploadImage: (file: File, signal: AbortSignal) => Promise<string>;
   onTime: (target: VideoTime) => void;
   canPlay: (video: string) => boolean;
 }) {
@@ -139,6 +139,9 @@ export function NoteEditor({
   const frame = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const picker = useRef<HTMLInputElement>(null);
+  // Uploads belong to one editor instance: destroying it aborts them, so a late reply never edits another note.
+  // Made in the mount effect: StrictMode mounts twice, and the first cleanup's aborted controller must not stay.
+  const uploads = useRef<AbortController | null>(null);
   const latest = useRef({ onChange, onSave, uploadImage });
   latest.current = { onChange, onSave, uploadImage };
   const [wide, setWide] = useState(false);
@@ -186,7 +189,9 @@ export function NoteEditor({
         },
       });
       try {
-        const path = await latest.current.uploadImage(file);
+        const signal = uploads.current?.signal ?? AbortSignal.abort();
+        const path = await latest.current.uploadImage(file, signal);
+        if (view.current !== editor) return;
         // Brackets, parentheses and newlines in a file name would break the inserted ![caption](path).
         const caption =
           file.name
@@ -195,11 +200,12 @@ export function NoteEditor({
             .trim() || "圖片";
         replaceMarker(`![${caption}](${path})`, caption.length);
       } catch (error) {
+        if (view.current !== editor) return;
         replaceMarker("");
         toast.error("圖片上傳失敗", { description: errorMessage(error) });
       }
     }
-    editor.focus();
+    if (view.current === editor) editor.focus();
   };
   const uploadRef = useRef(upload);
   uploadRef.current = upload;
@@ -267,8 +273,11 @@ export function NoteEditor({
       }),
     });
     view.current = editor;
+    const controller = new AbortController();
+    uploads.current = controller;
     editor.focus();
     return () => {
+      controller.abort();
       editor.destroy();
       view.current = null;
     };

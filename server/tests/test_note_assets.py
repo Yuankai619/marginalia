@@ -92,6 +92,14 @@ def test_accepts_ordinary_drawing_tool_svgs(deck):
             ),
             "DOCTYPE",
         ),
+        ("x.svg", b'<?xml version="1.0"?>\n<?xml-stylesheet type="text/css" href="https://evil.example/p.css"?>' + SVG, "處理指令"),
+        ("x.svg", b'<?xml-stylesheet href="https://evil.example/p.css"?>' + SVG, "處理指令"),
+        ("x.svg", SVG.replace(b"<rect", b'<?xml-stylesheet href="//evil.example/p.css"?><rect'), "處理指令"),
+        ("x.svg", svg(b'<style>@\\69mport "https://evil.example/i.css";</style>'), "樣式"),
+        ("x.svg", svg(b"<style>@im\\port url(https://evil.example/i.css);</style>"), "樣式"),
+        ("x.svg", svg(b"<style>rect{fill:u\\72l(https://evil.example/u)}</style>"), "樣式"),
+        ("x.svg", svg(b'<style>rect{background:image-set("https://evil.example/a.png" 1x)}</style>'), "樣式"),
+        ("x.svg", SVG.replace(b"<rect", b'<rect style="fill:\\75rl(https://evil.example/u)"'), "樣式"),
         ("x.svg", b"<svg><rect/></svg>", "格式"),
         ("x.svg", b"<svg xmlns='http://www.w3.org/2000/svg'><rect></svg>", "格式"),
         ("x.svg", b"<html><svg/></html>", "格式"),
@@ -138,4 +146,12 @@ def test_http_rejects_oversized_body_before_parsing(deck):
     big = PNG + b"\0" * (note_assets.MAX_BYTES + 128 * 1024)
     assert client.post(url, files={"file": ("big.png", big, "image/png")}).status_code == 413
     assert client.post(url, content=b"x", headers={"content-length": "nope"}).status_code == 411
+
+
+def test_served_svg_cannot_load_anything(deck):
+    client = TestClient(create_app(JobRunner()))
+    path = client.post("/api/courses/fixture/decks/l1/assets", files={"file": ("d.svg", SVG, "image/svg+xml")}).json()["path"]
+    response = client.get(f"/files/fixture/notes/l1/{path}")
+    assert response.status_code == 200
+    assert response.headers["content-security-policy"].startswith("default-src 'none'")
 

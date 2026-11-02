@@ -1,26 +1,36 @@
 import { ImageOff } from "lucide-react";
-import { useLayoutEffect, useRef, useState } from "react";
+import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import type { Region, Slide } from "@/lib/types";
 import { clamp, cn } from "@/lib/utils";
 
 const fraction = (value: number) => clamp(value, 0, 1);
+const BELOW_MIN = 180; // spare height worth filling with `below` instead of leaving it blank
+const GAP = 16;
 
-/** The current slide, scaled to fit the space it is given. Drag on it to ask the assistant about a region. */
+/**
+ * The current slide, scaled to fit the space it is given. Drag on it to ask the assistant about a region.
+ * A wide slide in a tall column leaves height over; when there is enough, the slide moves to the top and `below`
+ * fills the rest instead of blank space.
+ */
 export function SlideStage({
   slide,
   aspect,
   selectable,
   onRegion,
+  below,
 }: {
   slide: Slide;
   aspect: number;
   selectable: boolean;
   onRegion: (region: Region) => void;
+  below?: ReactNode;
 }) {
   const frame = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState<{ width: number; height: number } | null>(
-    null,
-  );
+  const [size, setSize] = useState<{
+    width: number;
+    height: number;
+    spare: number;
+  } | null>(null);
   const [origin, setOrigin] = useState<{ x: number; y: number } | null>(null);
   const [region, setRegion] = useState<Region | null>(null);
   const [failed, setFailed] = useState(false);
@@ -32,9 +42,11 @@ export function SlideStage({
       const { width, height } = node.getBoundingClientRect();
       if (!width || !height) return;
       const fitted = Math.min(width, height * aspect);
+      const slideHeight = Math.floor(fitted / aspect);
       setSize({
         width: Math.floor(fitted),
-        height: Math.floor(fitted / aspect),
+        height: slideHeight,
+        spare: Math.floor(height - slideHeight - GAP),
       });
     };
     measure();
@@ -42,6 +54,7 @@ export function SlideStage({
     observer.observe(node);
     return () => observer.disconnect();
   }, [aspect]);
+  const showBelow = !!below && !!size && size.spare >= BELOW_MIN;
 
   const point = (event: React.PointerEvent) => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -61,7 +74,10 @@ export function SlideStage({
   return (
     <div
       ref={frame}
-      className="flex min-h-0 min-w-0 flex-1 items-center justify-center"
+      className={cn(
+        "flex min-h-0 min-w-0 flex-1 flex-col items-center",
+        showBelow ? "justify-start" : "justify-center",
+      )}
     >
       {size && (
         <div
@@ -120,6 +136,14 @@ export function SlideStage({
               }}
             />
           )}
+        </div>
+      )}
+      {showBelow && size && (
+        <div
+          style={{ width: size.width, height: size.spare, marginTop: GAP }}
+          className="flex min-h-0 flex-col"
+        >
+          {below}
         </div>
       )}
     </div>

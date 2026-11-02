@@ -191,7 +191,7 @@ function GenerateDialog({
             會依序轉出投影片、對齊錄影、把老師的講解轉成文字、逐頁寫筆記，最後做筆記檢查。逐字稿最花時間，一部兩小時的錄影大約要半小時以上。
           </DialogDescription>
         </div>
-        <fieldset className="grid max-h-72 gap-0.5 overflow-y-auto rounded-[8px] border border-border p-1">
+        <fieldset className="grid max-h-[min(18rem,35dvh)] gap-0.5 overflow-y-auto rounded-[8px] border border-border p-1">
           <legend className="sr-only">要產生筆記的投影片</legend>
           {decks.map((deck) => (
             <label

@@ -1,4 +1,5 @@
 import {
+  Captions,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -145,7 +146,13 @@ export function Reader() {
   const [noteError, setNoteError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<Part[] | null>(null); // null while loading
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraftState] = useState("");
+  // save() may wait for uploads; it reads the draft as it is then, not as it was when save started.
+  const draftRef = useRef("");
+  const setDraft = useCallback((value: string) => {
+    draftRef.current = value;
+    setDraftState(value);
+  }, []);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [discarding, setDiscarding] = useState(false);
@@ -244,7 +251,7 @@ export function Reader() {
     return () => {
       active = false;
     };
-  }, [courseId, deckId, slideIndex]);
+  }, [courseId, deckId, slideIndex, setDraft]);
 
   const digest = useMemo(() => note && noteDigest(note.markdown), [note]);
 
@@ -305,12 +312,16 @@ export function Reader() {
 
   const save = async () => {
     if (!editing || saving || !data.editable) return false;
-    // Saving marks the note `edited` (generation never overwrites it again), so only save real changes.
-    if (!dirty) return true;
     setSaving(true);
     try {
-      const meta = await data.saveNote(courseId, deckId, slideIndex, draft);
-      setNote((old) => (old ? { ...old, markdown: draft, meta } : old));
+      // A pasted image is a placeholder until its upload finishes; saving it would lose the image.
+      while (uploads.current.size)
+        await Promise.allSettled([...uploads.current]);
+      const markdown = draftRef.current;
+      // Saving marks the note `edited` (generation never overwrites it again), so only save real changes.
+      if (markdown === note?.markdown) return true;
+      const meta = await data.saveNote(courseId, deckId, slideIndex, markdown);
+      setNote((old) => (old ? { ...old, markdown, meta } : old));
       setSavedAt(new Date());
       setDeck(
         (old) =>
@@ -338,6 +349,20 @@ export function Reader() {
     }
   };
   const saveRef = useRef(save);
+
+  const uploads = useRef(new Set<Promise<unknown>>());
+  const [uploading, setUploading] = useState(0);
+  const uploadImage = (file: File, signal: AbortSignal) => {
+    const request = data.uploadAsset(courseId, deckId, file, signal);
+    uploads.current.add(request);
+    setUploading(uploads.current.size);
+    const settle = () => {
+      uploads.current.delete(request);
+      setUploading(uploads.current.size);
+    };
+    request.then(settle, settle);
+    return request;
+  };
   saveRef.current = save;
 
   const keyboard = (event: KeyboardEvent) => {
@@ -492,6 +517,36 @@ export function Reader() {
             setRegion(next);
             openAgent();
           }}
+          below={
+            !pinned && (
+              <section
+                aria-label="老師這頁說了什麼"
+                className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[8px] border border-hairline bg-background"
+              >
+                <header className="flex h-9 shrink-0 items-center gap-2 border-b border-hairline px-3 text-[12.5px]">
+                  <Captions
+                    className="size-3.5 text-muted-foreground"
+                    aria-hidden
+                  />
+                  <span className="font-medium">老師這頁說了什麼</span>
+                  {transcript && transcript.length > 0 && (
+                    <span className="nums text-muted-foreground">
+                      {transcript.length} 段
+                    </span>
+                  )}
+                </header>
+                <div className="min-h-0 flex-1 overflow-y-auto px-3">
+                  <TranscriptList
+                    parts={transcript ?? []}
+                    loading={transcript === null}
+                    onTime={setPlayer}
+                    canPlay={canPlay}
+                    compact
+                  />
+                </div>
+              </section>
+            )
+          }
         />
       </div>
       {!mobile && (
@@ -607,10 +662,14 @@ export function Reader() {
               className="flex min-w-0 flex-1 items-center gap-1.5 text-[12.5px] text-muted-foreground"
               aria-live="polite"
             >
-              {saving ? (
+              {saving || uploading ? (
                 <>
                   <LoaderCircle className="size-3.5 animate-spin" aria-hidden />{" "}
-                  儲存中…
+                  {saving && uploading
+                    ? "等圖片上傳完成再儲存…"
+                    : saving
+                      ? "儲存中…"
+                      : "圖片上傳中…"}
                 </>
               ) : dirty ? (
                 <>
@@ -685,7 +744,7 @@ export function Reader() {
             onSave={() => void saveRef.current()}
             source={source}
             playback={playback}
-            uploadImage={(file) => data.uploadAsset(courseId, deckId, file)}
+            uploadImage={uploadImage}
             onTime={setPlayer}
             canPlay={canPlay}
           />
@@ -982,7 +1041,9 @@ export function Reader() {
         <DialogContent showClose={false}>
           <DialogTitle>筆記還沒儲存</DialogTitle>
           <DialogDescription>
-            離開這一頁前，要先儲存剛剛的修改嗎？
+            {uploading
+              ? "還有圖片在上傳。選「儲存並離開」會等上傳完成再儲存；「不儲存」會取消上傳。"
+              : "離開這一頁前，要先儲存剛剛的修改嗎？"}
           </DialogDescription>
           <div className="flex flex-wrap justify-end gap-2">
             <Button variant="ghost" onClick={() => blocker.reset?.()}>

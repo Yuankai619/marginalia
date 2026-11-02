@@ -41,7 +41,12 @@ export type DataAdapter = {
   ): Promise<Alignment>;
   upload(courseId: string, files: File[]): Promise<unknown>;
   /** Saves an image into notes/<deck>/assets/ and returns the markdown path (`assets/<name>`). */
-  uploadAsset(courseId: string, deckId: string, file: File): Promise<string>;
+  uploadAsset(
+    courseId: string,
+    deckId: string,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<string>;
   scan(courseId: string): Promise<unknown>;
   createJob(courseId: string, decks: string[]): Promise<{ id: string }>;
   job(id: string): Promise<Job>;
@@ -142,12 +147,12 @@ const local: DataAdapter = {
     if (!response.ok) throw new Error("匯入檔案失敗，請確認檔案格式並重試");
     return response.json();
   },
-  uploadAsset: async (c, d, file) => {
+  uploadAsset: async (c, d, file, signal) => {
     const body = new FormData();
     body.append("file", file);
     const { path } = await call<{ path: string }>(
       `${coursePath(c)}/decks/${pathSegment(d)}/assets`,
-      { method: "POST", body },
+      { method: "POST", body, signal },
     );
     return path;
   },

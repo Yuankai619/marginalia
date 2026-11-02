@@ -119,6 +119,90 @@ async function mermaidStaysLocal(browser, base) {
   console.log('PASS mermaid and markdown images never load remote URLs');
  }finally{await page.close();}
 }
+async function uploadBeforeLeave(browser, base) {
+ const page=await browser.newPage({viewport:{width:1440,height:1000}});
+ try {
+  const state=await fixture(page);
+  let release;
+  const held=new Promise(resolve=>{release=resolve;});
+  let uploads=0;
+  await page.route('**/api/courses/fixture/decks/deck/assets',async route=>{uploads++;await held;await json(route,{path:'assets/late-0123456789.png'});});
+  await page.goto(base+'/c/fixture/d/deck/1');
+  await page.getByRole('button',{name:'編輯',exact:true}).click();
+  const editor=page.locator('.cm-content');
+  await editor.waitFor();
+  await editor.evaluate(element=>{
+   const data=new DataTransfer();data.items.add(new File([new Uint8Array([137,80,78,71])],'late.png',{type:'image/png'}));
+   element.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
+  });
+  await page.getByText('圖片上傳中…').waitFor();
+  await page.getByRole('button',{name:'下一頁'}).click();
+  await page.getByRole('dialog').getByText('還有圖片在上傳').waitFor();
+  await page.getByRole('button',{name:'儲存並離開',exact:true}).click();
+  await page.getByText('等圖片上傳完成再儲存…').waitFor();
+  assert.equal(state.requests.filter(r=>r.method==='PUT').length,0,'must not save while the upload is pending');
+  assert(page.url().endsWith('/1'));
+  release();
+  await page.waitForURL('**/2');
+  const puts=state.requests.filter(r=>r.method==='PUT');
+  assert.equal(puts.length,1);
+  const saved=JSON.parse(puts[0].body).markdown;
+  assert(saved.includes('](assets/late-0123456789.png)'),saved);
+  assert(!saved.includes('上傳中'),saved);
+  // Discarding while an upload is pending cancels it; a late reply must not touch the next page's draft.
+  await page.getByRole('button',{name:'上一頁'}).click();await page.waitForURL('**/1');
+  let releaseSecond;
+  const heldSecond=new Promise(resolve=>{releaseSecond=resolve;});
+  await page.unroute('**/api/courses/fixture/decks/deck/assets');
+  await page.route('**/api/courses/fixture/decks/deck/assets',async route=>{await heldSecond;await json(route,{path:'assets/stale-0123456789.png'}).catch(()=>{});});
+  await page.getByRole('button',{name:'編輯',exact:true}).click();
+  await editor.evaluate(element=>{
+   const data=new DataTransfer();data.items.add(new File([new Uint8Array([137,80,78,71])],'stale.png',{type:'image/png'}));
+   element.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
+  });
+  await page.getByRole('button',{name:'下一頁'}).click();
+  await page.getByRole('button',{name:'不儲存',exact:true}).click();await page.waitForURL('**/2');
+  await page.getByRole('button',{name:'編輯',exact:true}).click();
+  await editor.waitFor();
+  releaseSecond();
+  await page.waitForTimeout(500);
+  assert(!(await editor.innerText()).includes('stale-0123456789'),'stale upload must not edit the next note');
+  assert.equal(state.requests.filter(r=>r.method==='PUT').length,1);
+  console.log('PASS saving waits for pending image uploads; stale uploads never edit another note');
+ }finally{await page.close();}
+}
+async function landscapeOverlays(browser, base) {
+ const context=await browser.newContext({viewport:{width:844,height:390}});
+ await context.addInitScript(()=>localStorage.setItem('marginalia:panes',JSON.stringify({slides:true,notes:true,agent:true})));
+ const page=await context.newPage();
+ try {
+  await fixture(page);
+  const many=['claude','codex-a','codex-b','codex-c'].map((id,i)=>({...account,id,provider:i?'codex':'claude',label:i?`帳號 ${i}`:'Claude',efforts:i?['low','medium','high']:['low','medium','high','xhigh','max'],models:i?[{id:'gpt-5',label:'gpt-5'}]:[{id:'opus',label:'Opus'},{id:'sonnet',label:'Sonnet'},{id:'haiku',label:'Haiku'}]}));
+  await page.route('**/api/agents/accounts',route=>json(route,many));
+  const inView=async(locator)=>{const box=await locator.boundingBox();return box&&box.y>=0&&box.y+box.height<=390;};
+  await page.goto(base+'/c/fixture/d/deck/1');
+  await page.locator('aside[aria-label="AI 助教"] header button[aria-haspopup]').first().click();
+  const manage=page.getByRole('button',{name:'管理帳號連線'});
+  await manage.waitFor();
+  const popup=page.locator('[role="dialog"]').filter({has:manage});
+  const box=await popup.boundingBox();
+  assert(box.y>=0&&box.y+box.height<=390,`model menu must fit the viewport: ${JSON.stringify(box)}`);
+  await popup.evaluate(element=>{element.scrollTop=element.scrollHeight;});
+  assert(await inView(manage),'管理帳號連線 must be reachable by scrolling the menu');
+  await page.keyboard.press('Escape');
+  await page.goto(base+'/c/fixture');
+  await page.getByRole('button',{name:'產生筆記'}).click();
+  const dialog=page.getByRole('dialog');
+  await dialog.waitFor();
+  await page.waitForTimeout(300);
+  const dbox=await dialog.boundingBox();
+  assert(dbox.y>=0&&dbox.y+dbox.height<=390,`dialog must fit the viewport: ${JSON.stringify(dbox)}`);
+  assert(await inView(dialog.getByRole('button',{name:'關閉'})),'close button visible');
+  await dialog.evaluate(element=>{element.scrollTop=element.scrollHeight;});
+  assert(await inView(dialog.getByRole('button',{name:'開始'})),'start button reachable');
+  console.log('PASS overlays fit a landscape phone (844×390)');
+ }finally{await context.close();}
+}
 async function run() {
  const browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/usr/bin/google-chrome',args:['--no-sandbox']});
  const errors=[];
@@ -240,6 +324,8 @@ async function run() {
   assert.equal(await staticPage.locator('button.timestamp').count(),0);
   assert((await staticPage.locator(NOTES+' .prose-note').innerText()).includes('00:12'));
   await mermaidStaysLocal(browser,local);
+  await uploadBeforeLeave(browser,local);
+  await landscapeOverlays(browser,local);
   await unicodeVideoLinks(browser,local,false);
   await unicodeVideoLinks(browser,preview,true);
   assert.deepEqual(errors,[]);
