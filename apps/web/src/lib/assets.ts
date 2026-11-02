@@ -10,6 +10,13 @@ export const IMAGE_FORMATS: Record<string, string> = {
 };
 const ASSET = /^assets\/([\p{L}\p{N}_][\p{L}\p{N}_.-]*)$/u;
 
+let uploadCount = 0;
+/** Text standing in for an image while it uploads; unique, so two pastes of `image.png` never collide. */
+export const uploadPlaceholder = (name: string) =>
+  `![上傳中：${name.replace(/[[\]()\r\n]+/g, " ")} #${++uploadCount}]()`;
+/** Any upload placeholder left in a note; such a note must not be saved (the image never arrived). */
+export const UPLOAD_PLACEHOLDER = /!\[上傳中：[^\]\n]*\]\(\)/;
+
 /** `/files/<course>/<…parts>`, each segment encoded; the one place course file URLs are built. */
 export const fileUrl = (courseId: string, ...parts: string[]) =>
   `/files/${[courseId, ...parts].map(encodeURIComponent).join("/")}`;

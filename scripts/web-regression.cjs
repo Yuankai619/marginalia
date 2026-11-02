@@ -203,6 +203,56 @@ async function landscapeOverlays(browser, base) {
   console.log('PASS overlays fit a landscape phone (844×390)');
  }finally{await context.close();}
 }
+async function uploadCancelledByLayout(browser, base) {
+ const context=await browser.newContext({viewport:{width:1440,height:1000}});
+ await context.addInitScript(()=>localStorage.setItem('marginalia:panes',JSON.stringify({slides:true,notes:true,agent:false})));
+ const page=await context.newPage();
+ try {
+  const state=await fixture(page);
+  const holds=[];
+  await page.route('**/api/courses/fixture/decks/deck/assets',async route=>{await new Promise(resolve=>holds.push(resolve));await json(route,{path:'assets/late-0123456789.png'}).catch(()=>{});});
+  const editor=page.locator('.cm-content');
+  const paste=()=>editor.evaluate(element=>{
+   const data=new DataTransfer();data.items.add(new File([new Uint8Array([137,80,78,71])],'slow.png',{type:'image/png'}));
+   element.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
+  });
+  const puts=()=>state.requests.filter(r=>r.method==='PUT').map(r=>JSON.parse(r.body).markdown);
+  await page.goto(base+'/c/fixture/d/deck/1');
+  await page.getByRole('button',{name:'編輯',exact:true}).click();
+  await editor.fill('保留的文字');
+  await editor.press('End');
+  // A: collapse the notes pane while the image uploads, then reopen it.
+  await paste();
+  await page.getByText('圖片上傳中…').waitFor();
+  await page.locator('body > div header').first().getByRole('button',{name:'筆記',exact:true}).click();
+  await page.getByText('圖片上傳已取消').first().waitFor();
+  await page.locator('body > div header').first().getByRole('button',{name:'筆記',exact:true}).click();
+  await editor.waitFor();
+  for(const release of holds.splice(0))release();
+  await page.waitForTimeout(300);
+  assert.equal(await editor.innerText(),'保留的文字','the placeholder is gone and the draft kept');
+  await editor.press('Control+s');
+  await page.getByText(/已儲存/).waitFor();
+  assert.deepEqual(puts(),['保留的文字']);
+  // B: cross the phone breakpoint while the image uploads.
+  await editor.press('End');
+  await paste();
+  await page.getByText('圖片上傳中…').waitFor();
+  await page.setViewportSize({width:390,height:844});
+  await editor.waitFor();
+  for(const release of holds.splice(0))release();
+  await page.waitForTimeout(300);
+  assert(!(await editor.innerText()).includes('上傳中'),'no placeholder after the layout change');
+  await page.setViewportSize({width:1440,height:1000});
+  await editor.waitFor();
+  // C: a placeholder that somehow remains (typed, pasted as text) blocks saving.
+  await editor.fill('有殘留 ![上傳中：x.png #9]()');
+  await editor.press('Control+s');
+  await page.getByText('筆記裡還有沒上傳完成的圖片').waitFor();
+  assert(puts().every(markdown=>!markdown.includes('上傳中')),JSON.stringify(puts()));
+  console.log('PASS uploads cancelled by collapsing or resizing restore the draft; placeholders are never saved');
+ }finally{await context.close();}
+}
 async function run() {
  const browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/usr/bin/google-chrome',args:['--no-sandbox']});
  const errors=[];
@@ -326,6 +376,7 @@ async function run() {
   await mermaidStaysLocal(browser,local);
   await uploadBeforeLeave(browser,local);
   await landscapeOverlays(browser,local);
+  await uploadCancelledByLayout(browser,local);
   await unicodeVideoLinks(browser,local,false);
   await unicodeVideoLinks(browser,preview,true);
   assert.deepEqual(errors,[]);

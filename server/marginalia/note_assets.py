@@ -92,6 +92,14 @@ _STANDARD_DOCTYPE = re.compile(
 
 def _check_svg(data: bytes) -> None:
     data = data.removeprefix(b"\xef\xbb\xbf")
+    # Every byte-level check below assumes UTF-8; a UTF-16 file would hide `<?…?>` from them.
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AssetError("SVG 必須是 UTF-8 編碼") from exc
+    encoding = re.match(rb"""\s*<\?xml\s[^?]*encoding\s*=\s*["']([^"']+)["']""", data)
+    if encoding and encoding.group(1).lower() not in {b"utf-8", b"utf8"}:
+        raise AssetError("SVG 必須是 UTF-8 編碼")
     # ElementTree drops processing instructions, so `<?xml-stylesheet href=…?>` would pass the tree checks and
     # stay in the saved bytes. Only the XML declaration itself is allowed.
     declaration = re.match(rb"\s*<\?xml\s[^?]*\?>", data)

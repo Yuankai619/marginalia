@@ -44,6 +44,7 @@ import { ResizeHandle } from "@/components/ui/resize-handle";
 import { EmptyState, LoadingState } from "@/components/ui/states";
 import { Hint } from "@/components/ui/tooltip";
 import { VideoPlayer } from "@/components/VideoPlayer";
+import { UPLOAD_PLACEHOLDER } from "@/lib/assets";
 import { data } from "@/lib/data";
 import { checkSummary, noteDigest, reviewView } from "@/lib/review";
 import type {
@@ -318,6 +319,12 @@ export function Reader() {
       while (uploads.current.size)
         await Promise.allSettled([...uploads.current]);
       const markdown = draftRef.current;
+      if (UPLOAD_PLACEHOLDER.test(markdown)) {
+        toast.error("筆記裡還有沒上傳完成的圖片", {
+          description: "刪掉「上傳中」那一行，或重新貼上圖片後再儲存。",
+        });
+        return false;
+      }
       // Saving marks the note `edited` (generation never overwrites it again), so only save real changes.
       if (markdown === note?.markdown) return true;
       const meta = await data.saveNote(courseId, deckId, slideIndex, markdown);

@@ -50,7 +50,7 @@ import {
 } from "@/components/ui/popover";
 import { Segmented } from "@/components/ui/segmented";
 import { Hint } from "@/components/ui/tooltip";
-import { IMAGE_FORMATS } from "@/lib/assets";
+import { IMAGE_FORMATS, uploadPlaceholder } from "@/lib/assets";
 import { ALERTS, type AlertKind } from "@/lib/remark-notes";
 import type { VideoTime } from "@/lib/types";
 import { cn, errorMessage } from "@/lib/utils";
@@ -142,6 +142,8 @@ export function NoteEditor({
   // Uploads belong to one editor instance: destroying it aborts them, so a late reply never edits another note.
   // Made in the mount effect: StrictMode mounts twice, and the first cleanup's aborted controller must not stay.
   const uploads = useRef<AbortController | null>(null);
+  // Placeholders of uploads still running, with the text each one replaced (a paste can replace a selection).
+  const pending = useRef(new Map<string, string>());
   const latest = useRef({ onChange, onSave, uploadImage });
   latest.current = { onChange, onSave, uploadImage };
   const [wide, setWide] = useState(false);
@@ -167,7 +169,7 @@ export function NoteEditor({
         toast.error("只能插入 png、jpg、webp 或 svg 圖片");
         continue;
       }
-      const marker = `![上傳中：${file.name}]()`;
+      const marker = uploadPlaceholder(file.name);
       // The document may change while uploading, so find the placeholder again before replacing it.
       const replaceMarker = (text: string, select?: number) => {
         const start = editor.state.doc.toString().indexOf(marker);
@@ -180,18 +182,14 @@ export function NoteEditor({
               : { anchor: start + 2, head: start + 2 + select },
         });
       };
-      const at = editor.state.selection.main.from;
-      editor.dispatch({
-        changes: {
-          from: at,
-          to: editor.state.selection.main.to,
-          insert: marker,
-        },
-      });
+      const { from, to } = editor.state.selection.main;
+      pending.current.set(marker, editor.state.sliceDoc(from, to));
+      editor.dispatch({ changes: { from, to, insert: marker } });
       try {
         const signal = uploads.current?.signal ?? AbortSignal.abort();
         const path = await latest.current.uploadImage(file, signal);
-        if (view.current !== editor) return;
+        if (view.current !== editor) return; // cleanup already put the original text back
+        pending.current.delete(marker);
         // Brackets, parentheses and newlines in a file name would break the inserted ![caption](path).
         const caption =
           file.name
@@ -201,7 +199,8 @@ export function NoteEditor({
         replaceMarker(`![${caption}](${path})`, caption.length);
       } catch (error) {
         if (view.current !== editor) return;
-        replaceMarker("");
+        replaceMarker(pending.current.get(marker) ?? "");
+        pending.current.delete(marker);
         toast.error("圖片上傳失敗", { description: errorMessage(error) });
       }
     }
@@ -277,11 +276,33 @@ export function NoteEditor({
     uploads.current = controller;
     editor.focus();
     return () => {
+      // The editor goes away (pane collapsed, layout change, leaving the note) while images upload: those uploads
+      // are cancelled, so put back what each placeholder replaced and hand the cleaned draft to the reader.
+      if (pending.current.size) {
+        let doc = editor.state.doc.toString();
+        for (const [marker, original] of pending.current)
+          doc = doc.replace(marker, original);
+        pending.current.clear();
+        latest.current.onChange(doc);
+        toast("圖片上傳已取消", {
+          description: "編輯畫面關掉了，請重新貼上圖片。",
+        });
+      }
       controller.abort();
       editor.destroy();
       view.current = null;
     };
   }, []);
+
+  // Follow drafts changed outside the editor (e.g. another editor instance cancelling its uploads while the layout
+  // swaps one editor for another). Typing round-trips through onChange, so this is a no-op then.
+  useEffect(() => {
+    const editor = view.current;
+    if (!editor || editor.state.doc.toString() === value) return;
+    editor.dispatch({
+      changes: { from: 0, to: editor.state.doc.length, insert: value },
+    });
+  }, [value]);
 
   const insert: Insert = (text, select) => {
     const editor = view.current;

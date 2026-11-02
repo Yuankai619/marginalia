@@ -10,6 +10,13 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 32
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>'
 
 
+UTF16_PI = (
+    "\ufeff<?xml version='1.0' encoding='UTF-16'?>\n"
+    "<?xml-stylesheet type='text/css' href='https://evil.example/u.css'?>\n"
+    "<svg xmlns='http://www.w3.org/2000/svg'><rect/></svg>"
+)
+
+
 def svg(body: bytes) -> bytes:
     return b'<svg xmlns="http://www.w3.org/2000/svg">' + body + b"</svg>"
 
@@ -100,6 +107,9 @@ def test_accepts_ordinary_drawing_tool_svgs(deck):
         ("x.svg", svg(b"<style>rect{fill:u\\72l(https://evil.example/u)}</style>"), "樣式"),
         ("x.svg", svg(b'<style>rect{background:image-set("https://evil.example/a.png" 1x)}</style>'), "樣式"),
         ("x.svg", SVG.replace(b"<rect", b'<rect style="fill:\\75rl(https://evil.example/u)"'), "樣式"),
+        ("x.svg", UTF16_PI.encode("utf-16-le"), "UTF-8"),
+        ("x.svg", UTF16_PI.encode("utf-16-be"), "UTF-8"),
+        ("x.svg", b'<?xml version="1.0" encoding="ISO-8859-1"?>' + SVG, "UTF-8"),
         ("x.svg", b"<svg><rect/></svg>", "格式"),
         ("x.svg", b"<svg xmlns='http://www.w3.org/2000/svg'><rect></svg>", "格式"),
         ("x.svg", b"<html><svg/></html>", "格式"),
