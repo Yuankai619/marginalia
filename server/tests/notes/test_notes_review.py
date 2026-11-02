@@ -165,31 +165,79 @@ def test_parse_findings():
     assert got == [{"reviewer": "x", "severity": "medium", "quote": "3", "problem": "p", "fix": ""}]
 
 
+TOP = "> [!IMPORTANT]\n> kernel 透過 system call 提供服務 [01:04](video:v1?t=64)。\n\n"
+
+
+def problems(body: str, m) -> list[str]:
+    return [f["problem"] for f in rules.check(body, m)]
+
+
 def test_rules_check(course):
     m = Gatherer(course, "d1").get(2)
     body = (
-        "總之，作業系統扮演著重要角色 ✅。\n\n**a** **b** **c** **d**\n\n## 什麼是 kernel？\n\n"
+        "總之，作業系統扮演著重要角色 ✅。\n\n## 什麼是 kernel？\n\n"
         "內存很大。進入 kernel [01:04](video:v1?t=64)、[00:10](video:v1?t=99)、[01:00](video:v1?t=500)、"
         "[00:01](video:v9?t=64)、[x](video:v1?t=abc)"
     )
-    problems = [f["problem"] for f in rules.check(body, m)]
-    joined = "\n".join(problems)
-    for expected in ("套話「總之」", "套話「扮演著」", "emoji", "粗體 4 處", "問句當標題", "大陸用語「內存」"):
+    got = problems(body, m)
+    joined = "\n".join(got)
+    for expected in ("套話「總之」", "套話「扮演著」", "emoji", "問句當標題", "大陸用語「內存」", "開頭不是 > [!IMPORTANT]"):
         assert expected in joined
-    assert "標籤 00:10 和 t=99（01:39）不一致。" in problems
-    assert "08:20 對不到這頁逐字稿任何一句的開頭。" in problems
-    assert "影片 v9 不是這頁出現的影片。" in problems
-    assert "時間點 t=abc 不是秒數。" in problems
-    assert rules.check("[x](video:v1?t=1e999)", m)[0]["problem"] == "時間點 t=1e999 不是秒數。"
-    assert rules.check("kernel 透過 system call 提供服務 [01:04](video:v1?t=64)。", m) == []
-    assert rules.check("[01:33](video:v1?t=93)", m) == []  # within LINE_SLACK of the t=90 line
+    assert "標籤 00:10 和 t=99（01:39）不一致。" in got
+    assert "08:20 對不到這頁逐字稿任何一句的開頭。" in got
+    assert "影片 v9 不是這頁出現的影片。" in got
+    assert "時間點 t=abc 不是秒數。" in got
+    assert problems(TOP + "[x](video:v1?t=1e999)", m) == ["時間點 t=1e999 不是秒數。"]
+    assert rules.check(TOP, m) == []
+    assert rules.check(TOP + "[01:33](video:v1?t=93)", m) == []  # within LINE_SLACK of the t=90 line
+
+
+def test_v2_marks(course):
+    m = Gatherer(course, "d1").get(2)
+    terms = " ".join(f"**term{i}**" for i in range(12))  # many bold terms are fine now
+    assert rules.check(TOP + terms + " ==要記住的一句== 和 ==另一句==", m) == []
+    got = problems(TOP + "**這一整句都被加粗了。** ==沒關好 > [!NOTICE] x", m)
+    assert got == ["整句或整段粗體。", "==highlight== 沒有配對。"]
+    assert "提示框類型 [!NOTICE] 不合法。" in problems(TOP + "> [!NOTICE]\n> x", m)
+    assert "highlight 7 處，超過 5 處。" in problems(TOP + " ".join(f"==h{i}==" for i in range(7)), m)
+
+
+def test_prose_checks_skip_code(course):
+    m = Gatherer(course, "d1").get(2)
+    code = "```mermaid\nflowchart TD\n  A[\"總之\"] ==> B[\"內存\"]\n```\n\n`==` 和 `**總之。**`"
+    assert rules.check(TOP + code, m) == []
+
+
+def test_mermaid_checks(course):
+    m = Gatherer(course, "d1").get(2)
+
+    def mermaid(src: str) -> list[str]:
+        return problems(TOP + f"```mermaid\n{src}\n```", m)
+
+    assert mermaid('flowchart LR\n  A["CPU (中央)"] -->|"trap"| B{"kernel?"}') == []
+    assert mermaid("sequenceDiagram\n  participant K as Kernel\n  K->>K: run") == []
+    assert mermaid("pie\n  a: 1") == ["mermaid 圖類型「pie」不支援，圖會壞掉。"]
+    assert mermaid('flowchart LR\n  A["x"] --> B["y"') == ["mermaid 圖的括號沒有配對，圖會壞掉。"]
+    assert mermaid("flowchart LR\n  A[CPU (中央)] --> B") == ["節點文字裡有括號卻沒加引號，mermaid 會解析失敗。"]
+    assert problems(TOP + "```mermaid\nflowchart LR\n  A --> B", m) == ["程式碼區塊（```）沒有關閉。"]
+
+
+def test_image_checks(course):
+    m = Gatherer(course, "d1").get(2)
+    m.assets.mkdir(parents=True)
+    (m.assets / "arch.svg").write_text("<svg/>")
+    assert rules.check(TOP + "![架構](assets/arch.svg)", m) == []
+    assert problems(TOP + "![x](assets/missing.png)", m) == ["圖片 assets/missing.png 不存在。"]
+    for bad in ("../secret.png", "/etc/passwd", "assets/../../x.svg", "https://example.com/a.png", "assets/a.gif"):
+        assert problems(TOP + f"![x]({bad})", m) == ["圖片路徑必須是 assets/<檔名>.png|jpg|webp|svg。"], bad
 
 
 def test_links_without_transcript_use_the_on_screen_range(course):
     (course.video_dir("v1") / "transcript.json").unlink()
     m = Gatherer(course, "d1").get(2)
-    assert rules.check("[01:20](video:v1?t=80)", m) == []
-    assert rules.check("[05:00](video:v1?t=300)", m)[0]["problem"] == "05:00 不在這頁出現在影片上的時間範圍內。"
+    top = "> [!IMPORTANT]\n> x\n\n"
+    assert rules.check(top + "[01:20](video:v1?t=80)", m) == []
+    assert rules.check(top + "[05:00](video:v1?t=300)", m)[0]["problem"] == "05:00 不在這頁出現在影片上的時間範圍內。"
 
 
 def test_normalize_links():

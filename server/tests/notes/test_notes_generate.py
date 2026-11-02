@@ -103,6 +103,13 @@ def test_unaligned_deck_writes_from_slides_without_links(course, calls):
     assert notefile.read(course.note_path("d1", 3))[0]["status"] == "generated"
 
 
+def test_clean_unwraps_whole_note_fences_but_keeps_inner_blocks():
+    note = "> [!IMPORTANT]\n> x\n\n```mermaid\nflowchart TD\n  A --> B\n```"
+    assert generate.clean(f"````markdown\n{note}\n````") == note
+    assert generate.clean(note) == note
+    assert generate.parse_output("```\nSKIP: 老師跳過\n```") == ("skipped", "老師跳過")
+
+
 def test_bad_slide_index(course, calls):
     with pytest.raises(IndexError):
         generate.generate_deck(course, "d1", slides=[9])

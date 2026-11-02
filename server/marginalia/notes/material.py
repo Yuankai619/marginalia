@@ -41,6 +41,7 @@ class Material:
     deck: dict
     slide: dict
     image: Path
+    assets: Path  # notes/<deck>/assets, where user-supplied images for the note live
     prev_title: str | None
     next_title: str | None
     outline: str
@@ -107,6 +108,7 @@ class Gatherer:
             deck=self.deck,
             slide=slide,
             image=self.course.deck_dir(self.deck["id"]) / "slides" / f"{slide_name(index)}.webp",
+            assets=self.course.notes_dir / self.deck["id"] / "assets",
             prev_title=self.slides[index - 2].get("title") if index > 1 else None,
             next_title=self.slides[index].get("title") if index < len(self.slides) else None,
             outline=self.outline,
