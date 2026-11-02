@@ -1,0 +1,18 @@
+{
+  "root": true,
+  "$schema": "https://biomejs.dev/schemas/2.6.4/schema.json",
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "a11y": {
+        "noStaticElementInteractions": "off",
+        "useButtonType": "off"
+      },
+      "style": { "noNonNullAssertion": "off" },
+      "suspicious": { "noArrayIndexKey": "off" }
+    }
+  },
+  "formatter": { "enabled": true, "indentStyle": "space" },
+  "files": { "includes": ["apps/web/src/**/*.ts", "apps/web/src/**/*.tsx"] }
+}
