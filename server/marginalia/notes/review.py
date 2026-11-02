@@ -23,6 +23,7 @@ from .generate import SYSTEM as WRITER_SYSTEM
 from .material import Gatherer, Material, render
 
 SEVERITIES = ("high", "medium", "low")
+FIELD_CHARS = 1000  # a finding is a sentence or two; anything longer is a reviewer gone wrong
 SYSTEM = f"你是作業系統課講義的審稿人。學生會拿這份筆記搭配投影片和上課影片讀。以下是筆記的寫作規範：\n\n{STYLE}"
 
 OUTPUT = """## 輸出格式
@@ -74,7 +75,7 @@ def parse_findings(text: str, reviewer: str) -> list[dict]:
         if not isinstance(f, dict) or not f.get("problem"):
             continue
         sev = f.get("severity") if f.get("severity") in SEVERITIES else "medium"
-        out.append({"reviewer": reviewer, "severity": sev, **{k: str(f.get(k) or "") for k in ("quote", "problem", "fix")}})
+        out.append({"reviewer": reviewer, "severity": sev, **{k: str(f.get(k) or "")[:FIELD_CHARS] for k in ("quote", "problem", "fix")}})
     return out
 
 

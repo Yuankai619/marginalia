@@ -1,7 +1,8 @@
 """One-shot calls through `codex exec`, the optional second engine.
 
 Uses whichever Codex login lives in the given CODEX_HOME. OPENAI_API_KEY is dropped from the child environment so a
-key in the shell can never switch billing to the API. The sandbox is read-only and the session is not persisted.
+key in the shell can never switch billing to the API. The sandbox is read-only, the session is not persisted, and
+the user's config.toml (MCP servers, hooks) is not loaded.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ def available(codex_home: Path | None = None) -> bool:
 
 
 def _env(codex_home: Path | None) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in ("OPENAI_API_KEY", "CODEX_API_KEY")}
+    env = {k: v for k, v in os.environ.items() if k not in ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL")}
     if codex_home:
         env["CODEX_HOME"] = str(codex_home)
     return env
@@ -37,7 +38,8 @@ async def complete(
     """Run one prompt and return codex's final message."""
     with tempfile.TemporaryDirectory(prefix="marginalia-codex-") as tmp:
         out = Path(tmp) / "last.txt"
-        args = ["codex", "exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--color", "never"]
+        args = ["codex", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--sandbox", "read-only"]
+        args += ["--color", "never"]
         args += ["-C", str(cwd or tmp), "-o", str(out)]
         if model:
             args += ["-m", model]
@@ -54,9 +56,11 @@ async def complete(
         try:
             _, err = await asyncio.wait_for(proc.communicate(prompt.encode()), timeout)
         except TimeoutError:
-            proc.kill()
-            await proc.wait()
             raise RuntimeError("Codex 逾時") from None
+        finally:
+            if proc.returncode is None:  # timed out or the job was cancelled
+                proc.kill()
+                await proc.wait()
         if proc.returncode != 0:
             tail = err.decode(errors="replace").strip().splitlines()[-1:] or [""]
             raise RuntimeError(f"Codex 執行失敗（{proc.returncode}）：{tail[0][:200]}")
