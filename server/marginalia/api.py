@@ -15,6 +15,7 @@ import yaml
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import ingest
 from .agents import chat
@@ -131,6 +132,7 @@ def _range_response(path: Path, request: Request):
             "Accept-Ranges": "bytes",
             "Content-Range": f"bytes {start}-{end}/{size}",
             "Content-Length": str(end - start + 1),
+            "X-Content-Type-Options": "nosniff",
         },
     )
 
@@ -168,6 +170,9 @@ async def _lifespan(app: FastAPI):
 
 def create_app(job_runner: JobRunner = runner) -> FastAPI:
     app = FastAPI(title="Marginalia local API", lifespan=_lifespan)
+    app.add_middleware(
+        TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"]
+    )
     app.state.jobs = job_runner
 
     @app.get("/api/health")
@@ -365,10 +370,22 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
     async def files(course_id: str, path: str, request: Request):
         course = _course(course_id)
         file = _safe_file(course, path)
+        headers = {"X-Content-Type-Options": "nosniff"}
         return (
             _range_response(file, request)
             if file.suffix.lower() in {".mp4", ".mkv", ".mov", ".webm", ".m4v"}
-            else FileResponse(file)
+            else FileResponse(
+                file,
+                headers={
+                    **headers,
+                    **(
+                        {"Content-Disposition": f'attachment; filename="{file.name}"'}
+                        if file.suffix.lower()
+                        in {".htm", ".html", ".mjs", ".js", ".svg", ".xhtml", ".xml"}
+                        else {}
+                    ),
+                },
+            )
         )
 
     @app.post("/api/courses/{course_id}/jobs")

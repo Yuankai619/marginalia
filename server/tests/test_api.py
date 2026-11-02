@@ -30,6 +30,24 @@ def test_file_path_stays_inside_course(tmp_path, monkeypatch):
     assert client.get(f"/files/{course.id}/../../etc/passwd").status_code == 404
 
 
+def test_local_api_rejects_untrusted_host(tmp_path, monkeypatch):
+    make_course(tmp_path, monkeypatch)
+    client = TestClient(create_app(JobRunner()))
+    assert (
+        client.get("/api/health", headers={"Host": "attacker.example"}).status_code
+        == 400
+    )
+
+
+def test_html_file_is_downloaded(tmp_path, monkeypatch):
+    course = make_course(tmp_path, monkeypatch)
+    (course.materials / "unsafe.html").write_text("<script>1</script>")
+    client = TestClient(create_app(JobRunner()))
+    response = client.get(f"/files/{course.id}/materials/unsafe.html")
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
 def test_video_suffix_range(tmp_path, monkeypatch):
     course = make_course(tmp_path, monkeypatch)
     (course.materials / "clip.mp4").write_bytes(b"0123456789")
