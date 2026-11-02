@@ -3,9 +3,10 @@
 Codex's read-only sandbox still lets its tools read any file on the machine, and the prompt carries untrusted course
 text, so Codex runs with every tool source turned off and the material travels inside the prompt (plus attached
 images). The CLI (0.165) still declares two tools nothing can remove: `exec`, whose code-mode host is disabled so every
-call fails, and `wait`, which only waits on exec. Before the first call we render the model-visible tool list offline
-(`codex debug prompt-input`, no model call) with the same flags and refuse to run if anything else shows up, so a CLI
-upgrade that adds a tool fails closed. It runs in an empty temp dir with an allowlisted environment, without the
+call fails, and `wait`, which only waits on exec. Before every call we render the model-visible tool list offline
+(`codex debug prompt-input`, no model call, about a second) with the same flags and the same resolved executable, and
+refuse to run if that check fails or lists anything else, or if the executable changed in between. A CLI upgrade that
+adds a tool therefore fails closed. It runs in an empty temp dir with an allowlisted environment, without the
 user's config.toml, and only with a ChatGPT subscription login: an API-key login is refused before Codex starts.
 """
 
@@ -28,7 +29,6 @@ CONFIG = (
     "tools.experimental_request_user_input.enabled=false", "tools.update_plan.enabled=false",
 )  # fmt: skip
 INERT_TOOLS = {"functions.exec", "functions.wait"}  # exec's host is disabled by code_mode_host above
-_verified = False  # the tool list passed once in this process
 ENV_KEEP = (
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR",
     "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
@@ -80,17 +80,29 @@ def tool_names(prompt_input: list) -> list[str]:
     return [n for item in prompt_input if item.get("type") == "additional_tools" for n in walk(item.get("tools", []))]
 
 
-async def verify_tools() -> None:
-    """Fail closed unless the model would see only the inert tools. Offline: renders the prompt and calls no model.
-    Runs against an empty CODEX_HOME, i.e. defaults plus our flags, which is what `exec --ignore-user-config` gets."""
-    global _verified
-    if _verified:
-        return
+def executable() -> tuple[str, tuple]:
+    """The codex binary PATH resolves to, followed through links, and its file identity."""
+    found = shutil.which("codex")
+    if found is None:
+        raise RuntimeError("找不到 codex 指令")
+    real = os.path.realpath(found)
+    return real, _identity(real)
+
+
+def _identity(path: str) -> tuple:
+    st = os.stat(path)
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns
+
+
+async def verify_tools(exe: str) -> None:
+    """Fail closed unless `exe` would show the model only the inert tools. Offline: renders the prompt, calls no
+    model. Runs against an empty CODEX_HOME, i.e. defaults plus our flags, which is what `exec --ignore-user-config`
+    gets. Not cached: a long-running server may see the CLI upgraded underneath it."""
     with tempfile.TemporaryDirectory(prefix="marginalia-codex-") as tmp:
         home = Path(tmp) / "home"
         home.mkdir()
         proc = await asyncio.create_subprocess_exec(
-            "codex", "debug", "prompt-input", *_lockdown(), "x",
+            exe, "debug", "prompt-input", *_lockdown(), "x",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, cwd=tmp, env=_env(home),
         )  # fmt: skip
         try:
@@ -99,17 +111,18 @@ async def verify_tools() -> None:
             if proc.returncode is None:
                 proc.kill()
                 await proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Codex 工具清單檢查失敗（結束碼 {proc.returncode}），不使用 Codex")
     try:
         names = tool_names(json.loads(out))
     except (ValueError, AttributeError, TypeError):
         raise RuntimeError("無法確認 Codex 的工具清單，不使用 Codex") from None
     if not names or set(names) - INERT_TOOLS:  # empty means the CLI stopped listing tools here: can't verify
         raise RuntimeError(f"Codex 會拿到工具 {', '.join(sorted(set(names) - INERT_TOOLS)) or '（無法確認）'}，不使用 Codex")
-    _verified = True
 
 
-def _args(tmp: str, out: Path, model: str | None, images: list[Path]) -> list[str]:
-    args = ["codex", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--sandbox", "read-only"]
+def _args(exe: str, tmp: str, out: Path, model: str | None, images: list[Path]) -> list[str]:
+    args = [exe, "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--sandbox", "read-only"]
     args += ["--color", "never", "-C", tmp, "-o", str(out), *_lockdown()]
     if model:
         args += ["-m", model]
@@ -129,11 +142,14 @@ async def complete(
     """Run one prompt and return codex's final message."""
     if problem := login_problem(codex_home):
         raise RuntimeError(problem)
-    await verify_tools()
+    exe, identity = executable()
+    await verify_tools(exe)
+    if _identity(exe) != identity:
+        raise RuntimeError("Codex 執行檔在檢查期間被換掉，不使用 Codex")
     with tempfile.TemporaryDirectory(prefix="marginalia-codex-") as tmp:
         out = Path(tmp) / "last.txt"
         proc = await asyncio.create_subprocess_exec(
-            *_args(tmp, out, model, images or []),
+            *_args(exe, tmp, out, model, images or []),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,

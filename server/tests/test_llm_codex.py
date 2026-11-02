@@ -8,11 +8,14 @@ import pytest
 from marginalia.llm import codex
 
 FAKE = """#!/bin/sh
-# `debug prompt-input` prints the tool list baked in below; `exec` records argv and env into the -o file
+# `debug prompt-input` prints the tool list baked in below and exits with DEBUG_EXIT; `exec` records argv and env
+# into the -o file, or fails with EXEC_FAIL
 if [ "$1" = debug ]; then
+  DEBUG_HOOK
   printf '%s' '[{"type":"additional_tools","tools":[{"type":"namespace","name":"functions","tools":[TOOLS]}]}]'
-  exit 0
+  exit DEBUG_EXIT
 fi
+EXEC_FAIL
 args="$*"
 out=""
 while [ $# -gt 0 ]; do
@@ -27,15 +30,15 @@ touch "$CODEX_HOME/ran"
 INERT = '{"type":"custom","name":"exec"},{"type":"function","name":"wait"}'
 
 
-def install_fake(bin_dir, tools: str = INERT) -> None:
+def install_fake(bin_dir, tools: str = INERT, debug_exit: int = 0, debug_hook: str = ":", exec_fail: str = ":") -> None:
     exe = bin_dir / "codex"
-    exe.write_text(FAKE.replace("TOOLS", tools))
+    script = FAKE.replace("TOOLS", tools).replace("DEBUG_EXIT", str(debug_exit))
+    exe.write_text(script.replace("DEBUG_HOOK", debug_hook).replace("EXEC_FAIL", exec_fail))
     exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
 
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
-    monkeypatch.setattr(codex, "_verified", False)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     install_fake(bin_dir)
@@ -73,8 +76,7 @@ def test_complete_runs_without_tools_or_inherited_secrets(home):
 
 
 def test_complete_reports_failure(home):
-    asyncio.run(codex.verify_tools())
-    (home.parent / "bin" / "codex").write_text("#!/bin/sh\necho 'not logged in' >&2\nexit 3\n")
+    install_fake(home.parent / "bin", exec_fail="echo 'not logged in' >&2; exit 3")
     with pytest.raises(RuntimeError, match="not logged in"):
         asyncio.run(codex.complete("x", codex_home=home))
 
@@ -93,3 +95,33 @@ def test_tool_names_walks_namespaces():
         {"type": "additional_tools", "tools": [{"type": "namespace", "name": "functions", "tools": [{"name": "exec"}]}, {"name": "x"}]},
     ]
     assert codex.tool_names(data) == ["functions.exec", "x"]
+
+
+def test_every_call_is_checked_so_an_upgrade_that_adds_tools_is_caught(home):
+    asyncio.run(codex.complete("first", codex_home=home))
+    (home / "ran").unlink()
+    install_fake(home.parent / "bin", INERT + ',{"type":"function","name":"shell"}')  # the CLI was upgraded
+    with pytest.raises(RuntimeError, match="shell"):
+        asyncio.run(codex.complete("second", codex_home=home))
+    assert not (home / "ran").exists()
+
+
+def test_check_that_exits_nonzero_is_a_failure_even_with_clean_output(home):
+    install_fake(home.parent / "bin", debug_exit=3)
+    with pytest.raises(RuntimeError, match="結束碼 3"):
+        asyncio.run(codex.complete("x", codex_home=home))
+    assert not (home / "ran").exists()
+
+
+def test_executable_swapped_during_the_check_is_refused(home):
+    install_fake(home.parent / "bin", debug_hook='echo "# changed" >> "$0"')
+    with pytest.raises(RuntimeError, match="被換掉"):
+        asyncio.run(codex.complete("x", codex_home=home))
+    assert not (home / "ran").exists()
+
+
+def test_the_checked_executable_is_the_one_that_runs(home):
+    out = asyncio.run(codex.complete("x", codex_home=home))
+    exe, _ = codex.executable()
+    assert exe == str((home.parent / "bin" / "codex").resolve())
+    assert "exec" in out.split("|")[2]

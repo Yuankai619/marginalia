@@ -65,7 +65,8 @@ def prompt(m: Material) -> str:
     return f"{render(m)}\n\n{TASK.format(index=m.index, links=LINKS_RULE if m.lines else NO_LINKS_RULE)}"
 
 
-def meta(m: Material, status: str, partial: bool = False) -> dict:
+def meta(m: Material, status: str, partial: str | None = None) -> dict:
+    """Frontmatter. `partial` is the inputs fingerprint when the note was written from incomplete material."""
     out = {
         "slide": m.index,
         "title": m.slide.get("title") or f"Slide {m.index}",
@@ -74,18 +75,20 @@ def meta(m: Material, status: str, partial: bool = False) -> dict:
         "updatedAt": notefile.now(),
     }
     if partial:
-        out["partial"] = True  # written before transcript/alignment were complete; the next run rewrites it
+        out["partial"] = True  # written before transcript/alignment were complete
+        out["inputs"] = partial  # the next run rewrites it once this fingerprint changes
     return out
 
 
-async def write_note(course: Course, m: Material, aligned: bool, force: bool = False) -> str:
-    """Write one slide's note and return its status, or "kept" when the note changed meanwhile and was left alone."""
+async def write_note(course: Course, m: Material, aligned: bool, force: bool = False, inputs: str = "") -> str:
+    """Write one slide's note and return its status, or "kept" when the note changed meanwhile and was left alone.
+    `inputs` is the material fingerprint recorded on partial notes."""
     path = course.note_path(m.deck["id"], m.index)
     base = notefile.version(path)  # compare-and-swap: only replace the exact version we started from
     current = notefile.read(path)
     if current is not None and not force and notefile.protected(current[0]):
         return "kept"
-    partial = False
+    partial = None
     if aligned and not m.ranges:
         status, body = "skipped", NOT_SHOWN
     else:
@@ -93,18 +96,19 @@ async def write_note(course: Course, m: Material, aligned: bool, force: bool = F
         status, body = parse_output(await claude.complete(call))
         if not body:
             raise RuntimeError(f"第 {m.index} 頁模型沒有回傳內容")
-        partial = m.partial
+        partial = inputs if m.partial else None
     return status if notefile.commit(path, meta(m, status, partial), body, base, force) else "kept"
 
 
-def _wanted(slides: list[int] | None, force: bool):
-    """Resuming fills missing notes and rewrites ones written from partial material; listed slides are rewritten;
-    the user's notes only with force."""
+def _wanted(slides: list[int] | None, force: bool, inputs: str):
+    """Resuming fills missing notes and rewrites partial ones once their material changed; listed slides are
+    rewritten; the user's notes only with force."""
 
     def keep(front: dict | None) -> bool:
         if front is None or force:
             return True
-        return not notefile.protected(front) and (slides is not None or bool(front.get("partial")))
+        stale = bool(front.get("partial")) and front.get("inputs") != inputs
+        return not notefile.protected(front) and (slides is not None or stale)
 
     return keep
 
@@ -114,7 +118,7 @@ async def agenerate_deck(
 ) -> dict:
     progress = progress or (lambda f, msg: None)
     g = Gatherer(course, deck_id)
-    todo = select(course, deck_id, len(g.slides), slides, _wanted(slides, force))
+    todo = select(course, deck_id, len(g.slides), slides, _wanted(slides, force, g.inputs))
     if not todo:
         progress(1.0, "沒有需要產生的筆記")
         return {"generated": [], "skipped": [], "kept": []}
@@ -122,7 +126,7 @@ async def agenerate_deck(
 
     async def one(i: int) -> str:
         async with sem:
-            return await write_note(course, g.get(i), g.aligned, force)
+            return await write_note(course, g.get(i), g.aligned, force, g.inputs)
 
     progress(0.0, f"產生 {len(todo)} 頁筆記")
     statuses = await run_slides(todo, one, "產生筆記", progress)

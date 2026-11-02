@@ -85,7 +85,8 @@ title: Roles of Operating System (OS)
 status: generated        # generated | reviewed | edited | skipped
 sources:
   - os20260916@846-1062   # video@start-end seconds the slide was on screen
-partial: true            # optional: written while the transcript or alignment was still pending; the next run rewrites it
+partial: true            # optional: written while the transcript or alignment was still pending
+inputs: 3f9a1c0b2d4e       # with partial: fingerprint of alignment/transcript files; rewritten once it changes
 updatedAt: 2026-11-03T10:00:00+08:00
 ---
 
@@ -108,7 +109,9 @@ flowchart TD
 - Status: a note without a `status` (a hand-written file) counts as `edited`. Generation never overwrites `edited`
   notes unless the user forces it, and every generated/reviewed write is a compare-and-swap on the file content.
 - `status: skipped` + one line when the teacher did not talk about the slide.
-- A course without recordings, or a deck that no aligned video shows, gets final slide-only notes (no `partial`).
+- A course without recordings (or with audio only), or a deck that no aligned video shows, gets final slide-only
+  notes (no `partial`). A partial note is regenerated only when its `inputs` fingerprint changes, so a video that
+  never aligns does not make every run call the model again.
 - Notes longer than the review limit (20,000 chars) are only rule-checked, never rewritten by the reviewer.
 - Timestamp links are plain markdown links with the `video:` scheme: `[mm:ss](video:<videoId>?t=<seconds>)`
   (`h:mm:ss` past an hour; `t` is whole seconds and the label is that same value). The UI renders them as chips

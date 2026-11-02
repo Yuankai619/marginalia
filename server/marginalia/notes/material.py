@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,6 +28,22 @@ def clock(seconds: float) -> str:
     s = round(seconds)  # the same rounding as every t= we write, so label and seek target agree
     h, m, s = s // 3600, s // 60 % 60, s % 60
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def inputs_fingerprint(course: Course) -> str:
+    """Changes whenever alignment or any transcript file changes (file stats only, nothing is parsed). A partial note
+    is rewritten only when this moved on, so a video that never aligns cannot make every run pay for it again."""
+    files = [course.gen / "alignment.json"]
+    for v in course.manifest()["videos"]:
+        files += [course.video_dir(v["id"]) / "transcript.json", course.video_dir(v["id"]) / "transcript.partial.json"]
+    stats = []
+    for f in files:
+        try:
+            st = f.stat()
+            stats.append(f"{f.name}:{st.st_size}:{st.st_mtime_ns}")
+        except FileNotFoundError:
+            stats.append(f"{f.name}:-")
+    return hashlib.sha256("|".join(stats).encode()).hexdigest()[:12]
 
 
 def load_transcript(course: Course, video: str) -> tuple[list[dict], bool]:
@@ -84,9 +101,11 @@ class Gatherer:
         segments = alignment.get("segments", [])
         self.aligned = any(s["deck"] == deck_id for s in segments)
         # an unaligned deck is only "not done yet" while some video still waits for alignment; a course without
-        # recordings (or a deck never shown in one) gets final slide-only notes
+        # recordings, audio (nothing to align), or a deck never shown in one gets final slide-only notes
         done = set(alignment.get("videos") or {}) | {s["video"] for s in segments}
-        self.waiting = not self.aligned and any(v["id"] not in done for v in course.manifest()["videos"])
+        videos = [v for v in course.manifest()["videos"] if v.get("kind") != "audio"]
+        self.waiting = not self.aligned and any(v["id"] not in done for v in videos)
+        self.inputs = inputs_fingerprint(course)
 
     def transcript(self, video: str) -> tuple[list[dict], bool]:
         if video not in self._transcripts:

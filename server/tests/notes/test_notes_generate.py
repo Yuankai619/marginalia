@@ -211,3 +211,47 @@ def test_unaligned_deck_waits_while_videos_are_not_aligned(course, calls):
     write_json(course.gen / "alignment.json", {"videos": {}, "segments": []})  # v1 exists but is not aligned yet
     generate.generate_deck(course, "d1", slides=[1])
     assert notefile.read(course.note_path("d1", 1))[0]["partial"] is True
+
+
+def _media(course, videos: list[dict], alignment: dict) -> None:
+    from marginalia.store import write_json
+
+    man = course.manifest()
+    man["videos"] = videos
+    course.save_manifest(man)
+    write_json(course.gen / "alignment.json", alignment)
+
+
+def test_audio_only_course_gets_final_notes(course, calls):
+    _media(course, [{"id": "v1", "kind": "audio", "source": "materials/v1.m4a", "duration": 300}], {"videos": {}, "segments": []})
+    assert generate.generate_deck(course, "d1")["generated"] == [1, 2, 3]
+    assert "partial" not in notefile.read(course.note_path("d1", 1))[0]
+    calls.clear()
+    assert generate.generate_deck(course, "d1")["generated"] == [] and not calls
+
+
+def test_audio_plus_an_aligned_video_without_this_deck_is_final(course, calls):
+    videos = [
+        {"id": "v1", "kind": "audio", "source": "materials/v1.m4a", "duration": 300},
+        {"id": "v2", "kind": "video", "source": "materials/v2.mp4", "duration": 300},
+    ]
+    other = {"video": "v2", "start": 0.0, "end": 60.0, "deck": "other", "slide": 1, "score": 0.9, "manual": False}
+    _media(course, videos, {"videos": {"v2": {"step": 2.0}}, "segments": [other]})
+    generate.generate_deck(course, "d1")
+    calls.clear()
+    assert generate.generate_deck(course, "d1")["generated"] == [] and not calls
+
+
+def test_video_that_never_aligns_does_not_cost_a_rerun_until_something_changes(course, calls):
+    from marginalia.store import write_json
+
+    # e.g. a recording with no usable frames: alignment runs but records nothing for it
+    _media(course, [{"id": "v1", "kind": "video", "source": "materials/v1.mp4", "duration": 300}], {"videos": {}, "segments": []})
+    generate.generate_deck(course, "d1", slides=[1])
+    meta = notefile.read(course.note_path("d1", 1))[0]
+    assert meta["partial"] is True and meta["inputs"]
+    calls.clear()
+    assert generate.generate_deck(course, "d1")["generated"] == [2, 3]  # 1 is partial but nothing changed since
+    calls.clear()
+    write_json(course.gen / "alignment.json", {"videos": {"v1": {"step": 2.0}}, "segments": []})  # alignment reran
+    assert 1 in generate.generate_deck(course, "d1")["generated"]

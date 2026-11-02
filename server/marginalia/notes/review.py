@@ -223,7 +223,7 @@ class Reviewer:
         record.update(revised=final != body, noteHash=notefile.digest(final), unresolved=unresolved)
 
         if status is not None:
-            new_meta = {**front, **meta(m, status, bool(front.get("partial")))}
+            new_meta = {**front, **meta(m, status)}  # keeps the note's own partial / inputs
             if not notefile.commit(path, new_meta, final, base, force):
                 return "conflict", record
         elif notefile.version(path) != base:
