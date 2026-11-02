@@ -69,7 +69,7 @@ def test_transcribe_refreshes_stale_audio_and_records_source_fingerprint(monkeyp
     source.write_bytes(b"new full source")
     extracted = []
 
-    def extract(src, out):
+    def extract(src, out, **_kwargs):
         extracted.append(src)
         out.write_bytes(b"new extracted audio")
 
@@ -110,3 +110,41 @@ def test_scan_invalidates_deck_render_and_duration_on_same_size_source_change(mo
 
     assert not updated["decks"][0].get("rendered")
     assert probes == [source, source]
+
+
+def test_transcribe_rejects_internal_audio_alias_before_any_subprocess(monkeypatch, course, tmp_path):
+    recording(course)
+    directory = course.video_dir("recording")
+    directory.mkdir(parents=True)
+    outside = tmp_path / "outside-sentinel.wav"
+    outside.write_bytes(b"sentinel")
+    (directory / "audio.wav").symlink_to("renamed.wav")
+    (directory / "renamed.part.wav").symlink_to(outside)
+    calls = []
+    monkeypatch.setattr(transcribe.media.subprocess, "run", lambda *_args, **_kwargs: calls.append(True))
+
+    with pytest.raises(ValueError, match="符號連結"):
+        transcribe.transcribe_video(course, "recording")
+
+    assert calls == []
+    assert outside.read_bytes() == b"sentinel"
+    assert not (directory / "renamed.wav").exists()
+    assert not (directory / "audio.part.wav").exists()
+
+
+def test_frame_cache_rejects_alias_that_changes_implicit_numpy_suffix(monkeypatch, course, tmp_path):
+    recording(course)
+    directory = course.video_dir("recording")
+    directory.mkdir(parents=True)
+    outside = tmp_path / "outside-sentinel.npz"
+    outside.write_bytes(b"sentinel")
+    (directory / "frames.npz").symlink_to("renamed")
+    (directory / "renamed.npz").symlink_to(outside)
+    calls = []
+    monkeypatch.setattr(align.media, "sample_frames", lambda *_args, **_kwargs: calls.append(True))
+
+    with pytest.raises(ValueError, match="符號連結"):
+        align.video_crops(course, "recording")
+
+    assert calls == []
+    assert outside.read_bytes() == b"sentinel"

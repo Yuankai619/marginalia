@@ -22,10 +22,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import tempfile
+import secrets
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from . import config
 
@@ -51,11 +53,63 @@ def write_json(path: Path, data: Any) -> None:
 
 def write_text(path: Path, text: str) -> None:
     """Atomic write so a crash never leaves half a note on disk."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    with atomic_output(path) as output:
+        output.write(text.encode("utf-8"))
+
+
+@contextmanager
+def _directory_fd(path: Path, *, create: bool = True) -> Iterator[int]:
+    """Pin every parent directory without following symlinks along the way."""
+    path = path.absolute()
+    fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            if create:
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def atomic_output(path: Path, *, root: Path | None = None) -> Iterator[BinaryIO]:
+    """Create, replace and clean up through one pinned directory descriptor."""
+    if path.is_symlink():
+        raise ValueError(f"輸出檔案不能是符號連結：{path}")
+    destination = Path(os.path.abspath(path))
+    # The caller supplies the checked boundary. Never re-resolve it through a
+    # replacement symlink; the directory walk below rejects every such link.
+    if root is not None and not destination.is_relative_to(Path(os.path.abspath(root))):
+        raise ValueError(f"路徑超出允許範圍：{path}")
+    with _directory_fd(destination.parent) as directory:
+        name = f".tmp-{secrets.token_hex(16)}"
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+        try:
+            with os.fdopen(fd, "wb") as output:
+                identity = os.fstat(output.fileno())
+                yield output
+                if not os.path.samestat(identity, os.stat(name, dir_fd=directory, follow_symlinks=False)):
+                    raise ValueError("暫存檔在寫入期間遭置換")
+            os.replace(name, destination.name, src_dir_fd=directory, dst_dir_fd=directory)
+        finally:
+            try:
+                os.unlink(name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+
+
+def unlink_output(path: Path) -> None:
+    try:
+        with _directory_fd(path.parent, create=False) as directory:
+            os.unlink(path.name, dir_fd=directory)
+    except FileNotFoundError:
+        pass
 
 
 def slide_name(index: int) -> str:
@@ -131,6 +185,12 @@ class Course:
 
     def video_path(self, video: str, *parts: str) -> Path:
         return self.path(config.GENERATED, "videos", validate_id(video), *parts)
+
+    def video_output_path(self, video: str, name: str) -> Path:
+        path = self.video_dir(video) / name
+        if path.is_symlink():
+            raise ValueError(f"輸出檔案不能是符號連結：{path}")
+        return confined_path(self.gen, path)
 
     def deck_dir(self, deck: str) -> Path:
         return self.deck_path(deck)

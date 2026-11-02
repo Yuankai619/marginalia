@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from marginalia import align
 from marginalia.align import NONE, _viterbi, candidate_decks, detect_region
@@ -56,6 +57,7 @@ def test_page_number_features_distinguish_identical_titles_during_animation():
     frame[2:5, 153] = 0
     frame[2:5, 156] = 0
     crops = np.full((2, align.CH, align.CW), 255, np.uint8)
+    crops[:, 25:29, 20:40] = 0
     slides = align._features(crops, np.stack([align._number_crop(early), align._number_crop(late)]))
     features = align._features(crops[:1], align._number_crop(frame)[None])
 
@@ -152,3 +154,41 @@ def test_align_course_skips_a_video_without_frames_and_continues(monkeypatch, co
 
     assert [(s["video"], s["deck"], s["slide"]) for s in result["segments"]] == [("valid", "deck", 1)]
     assert course.alignment() == result
+
+
+@pytest.mark.parametrize("brightness", [0, 32, 96, 200, 255])
+@pytest.mark.parametrize("cached_fake_numbers", [False, True])
+def test_uniform_frames_stay_unaligned_despite_single_stroke_page_number(monkeypatch, course, brightness, cached_fake_numbers):
+    course.source_path("materials/video.mp4").touch()
+    course.save_manifest({
+        "decks": [{"id": "deck", "source": "materials/deck.pdf", "rendered": True,
+                   "slideCount": 1, "width": 320, "height": 180, "date": "2026-09-16"}],
+        "videos": [{"id": "video", "title": "黑畫面", "source": "materials/video.mp4",
+                    "kind": "video", "duration": 60, "date": "2026-09-16"}],
+    })
+    slide = np.full((180, 320), 255, np.uint8)
+    slide[20:28, 60:260] = 0
+    slide[60:68, 30:250] = 0
+    slide[4:11, 307] = 0
+    thumb = course.deck_path("deck", "thumbs", "001.webp")
+    thumb.parent.mkdir(parents=True)
+    Image.fromarray(slide).save(thumb, lossless=True)
+    frame = np.full((216, 384), brightness, np.uint8)
+    monkeypatch.setattr(align.media, "sample_frames", lambda *_args, **_kwargs: iter((2 * i + 1, frame) for i in range(30)))
+    assert not align._number_crop(frame).any()
+
+    if cached_fake_numbers:
+        # Even an old/bogus number vector cannot promote frames with no slide ink.
+        cache = align.video_crops(course, "video")
+        cache["numbers"][:] = 255
+        np.savez_compressed(course.video_path("video", "frames.npz"), **cache)
+
+    result = align.align_course(course)
+
+    assert len(result["segments"]) == 1
+    segment = result["segments"][0]
+    assert segment["start"] == 0
+    assert segment["end"] == 60
+    assert segment["deck"] is None
+    assert segment["slide"] is None
+    assert segment["score"] < 0.45

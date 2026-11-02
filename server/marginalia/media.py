@@ -9,6 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .store import atomic_output
+
 
 def ffmpeg_exe() -> str:
     found = shutil.which("ffmpeg")
@@ -29,15 +31,13 @@ def duration(path: Path) -> float:
         return float(s.duration * s.time_base) if s.duration else 0.0
 
 
-def extract_audio(video: Path, out_wav: Path) -> Path:
+def extract_audio(video: Path, out_wav: Path, *, root: Path) -> Path:
     """16 kHz mono wav, what whisper wants."""
-    out_wav.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out_wav.with_suffix(".part.wav")
-    subprocess.run(
-        [ffmpeg_exe(), "-loglevel", "error", "-y", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000", str(tmp)],
-        check=True,
-    )
-    tmp.replace(out_wav)
+    with atomic_output(out_wav, root=root) as audio:
+        subprocess.run(
+            [ffmpeg_exe(), "-loglevel", "error", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", "pipe:1"],
+            stdout=audio, check=True,
+        )
     return out_wav
 
 
@@ -71,10 +71,14 @@ def sample_frames(video: Path, every: float = 2.0, width: int = 384, height: int
 
 
 def frame_at(video: Path, seconds: float, out: Path, width: int = 960) -> Path:
-    out.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [ffmpeg_exe(), "-loglevel", "error", "-y", "-ss", f"{seconds:.2f}", "-i", str(video),
-         "-frames:v", "1", "-vf", f"scale={width}:-2", str(out)],
-        check=True,
-    )
+    codecs = {".png": "png", ".webp": "libwebp", ".jpg": "mjpeg", ".jpeg": "mjpeg", ".bmp": "bmp", ".tif": "tiff", ".tiff": "tiff", ".ppm": "ppm"}
+    codec = codecs.get(out.suffix.lower())
+    if not codec:
+        raise ValueError(f"不支援的影格圖片格式：{out.suffix}")
+    with atomic_output(out) as output:
+        subprocess.run(
+            [ffmpeg_exe(), "-loglevel", "error", "-ss", f"{seconds:.2f}", "-i", str(video),
+             "-frames:v", "1", "-vf", f"scale={width}:-2", "-c:v", codec, "-f", "image2pipe", "pipe:1"],
+            stdout=output, check=True,
+        )
     return out

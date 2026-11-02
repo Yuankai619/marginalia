@@ -20,13 +20,13 @@ import numpy as np
 from PIL import Image
 
 from . import config, media
-from .store import Course, slide_name, write_json
+from .store import Course, atomic_output, slide_name, write_json
 
 CW, CH = 128, 72  # stored crop of the slide area per frame
 STEP = 2.0  # seconds between sampled frames
 NONE = -1
 TITLE_ROWS = (3, 12)  # exclude the running header and first body-text line
-FRAME_CACHE_VERSION = 6
+FRAME_CACHE_VERSION = 7
 
 
 def _crop(gray: np.ndarray) -> np.ndarray:
@@ -43,8 +43,10 @@ def _number_crop(gray: np.ndarray) -> np.ndarray:
     """Keep the aspect of the page-number ink; no OCR or external model."""
     h, w = gray.shape
     patch = gray[round(h * 0.015):round(h * 0.07), round(w * 0.94):round(w * 0.995)]
-    ys, xs = np.where(patch < 235)
     canvas = Image.new("L", (16, 16))
+    if not patch.size or np.ptp(patch) < 20:
+        return np.asarray(canvas)
+    ys, xs = np.where(patch < 235)
     if len(xs):
         ink = Image.fromarray(255 - patch[ys.min():ys.max() + 1, xs.min():xs.max() + 1])
         scale = 16 / max(ink.size)
@@ -107,7 +109,10 @@ def similarity(frames: dict, slides: dict) -> np.ndarray:
     contain = np.where(f_ink < 8, 0.5, contain)
     score = 0.45 * title + 0.4 * contain + 0.15 * cover
     if "number" in frames and "number" in slides:
-        numbered = (frames["number"].any(axis=1)[:, None] & slides["number"].any(axis=1)[None, :])
+        numbered = (
+            (f_ink >= 8) & frames["number"].any(axis=1)[:, None]
+            & slides["number"].any(axis=1)[None, :]
+        )
         score = np.where(numbered, 0.65 * score + 0.35 * (frames["number"] @ slides["number"].T), score)
     return score
 
@@ -160,7 +165,6 @@ def _overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> floa
 
 def video_crops(course: Course, video_id: str, progress=lambda f, m: None) -> dict:
     """Sample frames, find the slide region per two-minute window, keep small crops."""
-    vdir = course.video_dir(video_id)
     v = course.video(video_id)
     if v.get("kind") == "audio":
         return {"times": np.zeros(0), "crops": np.zeros((0, CH, CW), np.uint8), "boxes": np.zeros((0, 4))}
@@ -170,7 +174,7 @@ def video_crops(course: Course, video_id: str, progress=lambda f, m: None) -> di
         d["width"] / d["height"] for d in course.manifest()["decks"]
         if d["id"] in candidates and d.get("width", 0) > 0 and d.get("height", 0) > 0
     })
-    cache = course.video_path(video_id, "frames.npz")
+    cache = course.video_output_path(video_id, "frames.npz")
     if cache.exists():
         with np.load(cache) as d:
             if (
@@ -215,8 +219,8 @@ def video_crops(course: Course, video_id: str, progress=lambda f, m: None) -> di
         "aspects": np.array(aspects),
         **{key: np.array(value) for key, value in fingerprint.items()},
     }
-    vdir.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(cache, **out)
+    with atomic_output(cache, root=course.gen) as output:
+        np.savez_compressed(output, **out)
     return out
 
 

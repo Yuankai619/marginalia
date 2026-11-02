@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable
 
 from . import config, media
-from .store import Course, read_json, write_json
+from .store import Course, read_json, unlink_output, write_json
 
 Progress = Callable[[float, str], None]
 
@@ -32,14 +32,13 @@ def transcribe_video(course: Course, video_id: str, progress: Progress | None = 
     if not v:
         raise KeyError(video_id)
     fingerprint = course.fingerprint(v)
-    wav = course.video_path(video_id, "audio.wav")
-    wav_meta = course.video_path(video_id, "audio.source.json")
-    transcript = course.video_path(video_id, "transcript.json")
-    partial = course.video_path(video_id, "transcript.partial.json")
-    course.video_path(video_id, "audio.part.wav")
+    wav = course.video_output_path(video_id, "audio.wav")
+    wav_meta = course.video_output_path(video_id, "audio.source.json")
+    transcript = course.video_output_path(video_id, "transcript.json")
+    partial = course.video_output_path(video_id, "transcript.partial.json")
     if not wav.exists() or read_json(wav_meta) != fingerprint:
         progress(0.0, "抽出音訊")
-        media.extract_audio(course.source_path(v["source"]), wav)
+        media.extract_audio(course.source_path(v["source"]), wav, root=course.gen)
         write_json(wav_meta, fingerprint)
 
     from faster_whisper import WhisperModel
@@ -73,8 +72,8 @@ def transcribe_video(course: Course, video_id: str, progress: Progress | None = 
             write_json(partial, {"segments": segs, "sourceFingerprint": fingerprint})
     out = {"model": model_name, "language": info.language, "duration": total, "segments": segs, "sourceFingerprint": fingerprint}
     write_json(transcript, out)
-    partial.unlink(missing_ok=True)
-    wav.unlink(missing_ok=True)
-    wav_meta.unlink(missing_ok=True)
+    unlink_output(partial)
+    unlink_output(wav)
+    unlink_output(wav_meta)
     progress(1.0, f"完成：{len(segs)} 段")
     return out

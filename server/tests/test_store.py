@@ -3,7 +3,7 @@ import zipfile
 import pytest
 
 from marginalia import align, cli, ingest, slides, transcribe
-from marginalia.store import Course, write_json
+from marginalia.store import Course, unlink_output, write_json
 
 
 @pytest.mark.parametrize("identifier", ["../escape", "a/b", "/tmp/escape", ".", "..", "a.b", "a\\b", "", "-flag"])
@@ -111,3 +111,22 @@ def test_zip_checks_path_components_and_existing_symlinks(course, tmp_path):
     with zipfile.ZipFile(archive) as zf, pytest.raises(RuntimeError):
         ingest._safe_extract(zf, dest)
     assert not (outside / "escape.txt").exists()
+
+
+def test_stale_output_paths_cannot_write_or_unlink_after_parent_becomes_symlink(course, tmp_path):
+    output = course.video_path("recording", "audio.source.json")
+    output.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / output.name
+    sentinel.write_bytes(b"sentinel")
+    output.parent.rename(output.parent.with_name("saved"))
+    output.parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        write_json(output, {"new": "data"})
+    with pytest.raises(OSError):
+        unlink_output(output)
+
+    assert sentinel.read_bytes() == b"sentinel"
+    assert list(outside.glob(".tmp-*")) == []
