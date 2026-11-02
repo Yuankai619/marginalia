@@ -62,6 +62,7 @@ def test_claude_read_permissions_confine_all_tools(tmp_path):
 
 
 def setup_codex(tmp_path, monkeypatch):
+    monkeypatch.setattr(codex_chat.shutil, "which", lambda name: "/fixture/codex")
     home = tmp_path / "home"
     account = home / ".codex-test"
     account.mkdir(parents=True)
