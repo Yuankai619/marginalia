@@ -573,6 +573,7 @@ def test_shared_course_prompt_has_one_budget_and_keeps_current_context(course):
                 "index": 1,
                 "title": "目前頁",
                 "text": "CURRENT_PRIORITY" + "甲" * 200_000,
+                "speakerNotes": "SPEAKER_PRIORITY" + "註" * 20_000,
             },
         ],
     )
@@ -609,9 +610,11 @@ def test_shared_course_prompt_has_one_budget_and_keeps_current_context(course):
             ],
         },
     )
+    course.note_path("first", 1).parent.mkdir(parents=True, exist_ok=True)
+    course.note_path("first", 1).write_text("NOTE_PRIORITY" + "筆" * 50_000)
     system = prompts.build_system(
         course,
-        "qa",
+        "review",
         "first",
         1,
         selection={"text": "SELECTED_PRIORITY" + "選" * 10_000},
@@ -625,6 +628,8 @@ def test_shared_course_prompt_has_one_budget_and_keeps_current_context(course):
             "OTHER_DECK_PRIORITY",
             "SELECTED_PRIORITY",
             "CURRENT_TRANSCRIPT_PRIORITY",
+            "NOTE_PRIORITY",
+            "SPEAKER_PRIORITY",
         )
     )
     assert "已截斷" in system
