@@ -17,7 +17,7 @@ Marginalia turns lecture slides and recordings into study notes, with each expla
 
 The interface, generated notes, and agent replies use Traditional Chinese (Taiwan). This README is in English.
 
-> **Integration draft:** this guide covers the work in [pipeline #1](https://github.com/Yuankai619/marginalia/pull/1), [web #2](https://github.com/Yuankai619/marginalia/pull/2), [API #4](https://github.com/Yuankai619/marginalia/pull/4), and [notes #5](https://github.com/Yuankai619/marginalia/pull/5). The pipeline is now on `main`; the other features are not all merged yet. Some web interactions are still previews, note format v2 is being implemented, and static data export is not wired up. The setup and end-to-end commands must be rechecked after integration.
+> **Integration draft:** this guide covers the work in [pipeline #1](https://github.com/Yuankai619/marginalia/pull/1), [web #2](https://github.com/Yuankai619/marginalia/pull/2), [API #4](https://github.com/Yuankai619/marginalia/pull/4), and [notes #5](https://github.com/Yuankai619/marginalia/pull/5). The pipeline and web interface are now on `main`; the API and notes branches are not yet merged. The web interface is connected to the local API contract, while note format v2 and static data export still need integration. The setup and end-to-end commands must be rechecked after integration.
 
 ## Requirements
 
@@ -120,9 +120,9 @@ Run `pnpm` commands from the repository root and `uv run marginalia ...` command
    pnpm dev
    ```
 
-5. Open <http://localhost:5173> and choose the course. **開始生成** (Generate) is the intended UI entry point for processing and progress, but the API-to-pipeline job wiring is still incomplete in this draft. Use the CLI command below to process the course until that integration lands.
+5. Open <http://localhost:5173> and choose the course. With the API and notes backend installed, click **開始生成** (Generate) and follow the job progress. The frontend now sends real API requests, but those backend branches are not yet on `main`; use the CLI below for the processing stages available on `main` until integration lands.
 
-The course page also has a drag-and-drop upload preview; use the folder-and-scan route above until uploads are connected. Processing can start CPU-intensive transcription and consume your Claude subscription allowance.
+The course page supports drag-and-drop uploads and **重新掃描** (Rescan) through the local API. These require the API backend; the folder-and-scan route above also works from the CLI. Processing can start CPU-intensive transcription and consume your Claude subscription allowance.
 
 To process a deck from the CLI, first find its ID in `courses/operating-system/generated/manifest.json`, then run from `server/`:
 
@@ -131,6 +131,16 @@ uv run marginalia process operating-system --deck l1-operating-systems-a-recap
 ```
 
 That deck ID is an example: replace it with one in your manifest. Rendering is reused when current. `process` reuses completed transcripts only when their recorded source path, size, and modification time match the source file; changed sources and legacy transcripts without a fingerprint are transcribed again. Rerunning also fills in missing notes. It aligns against all course videos even when a single deck is selected. The current pipeline calls the note writer when installed; automated review is a separate job, not a step currently invoked by `process`.
+
+### Access from another device
+
+Bind Vite to this computer's Tailscale IP, replacing the example with your own:
+
+```sh
+pnpm dev -- --host 100.81.100.96
+```
+
+Open `http://100.81.100.96:5173` from another device on the same tailnet. Do not bind to `0.0.0.0` or a public IP: the development interface has no login protection and exposes course files and the local agent through its proxy. `--host` is passed only to Vite; the backend remains on `127.0.0.1:8765`. Keep `changeOrigin: true` on both `/api` and `/files` proxies so backend TrustedHost checks accept requests from the other device.
 
 ## Course files
 
@@ -240,7 +250,7 @@ Or, from `server/`:
 MARGINALIA_WHISPER_THREADS=6 uv run marginalia transcribe operating-system --video os20260916
 ```
 
-The web adapter has separate build-time settings: `VITE_MARGINALIA_MODE=static` selects static JSON instead of the local API; otherwise it uses local mode. `VITE_MARGINALIA_MOCK=true` selects development mock data in local mode. Setting static mode alone does not export course data.
+The web adapter uses `VITE_MARGINALIA_MODE`: `static` reads exported JSON, `mock` explicitly enables demo data and simulated agent replies, and the default uses the local API. `pnpm build` sets static mode automatically. Setting static mode alone does not export course data.
 
 ## How notes are generated
 
@@ -302,7 +312,7 @@ flowchart TD
 ![資源協調示意圖](assets/resource-flow.svg)
 ````
 
-The timestamp syntax is `[mm:ss](video:<video-id>?t=<seconds>)`, also allowing an hour in the label. These links are intended to seek the corresponding video. The current web draft only opens a player preview showing the selected time; actual video playback and seeking still need integration.
+The timestamp syntax is `[mm:ss](video:<video-id>?t=<seconds>)`, also allowing an hour in the label. When the recording has a playback source, clicking a timestamp opens the corresponding video and seeks to that time. Without a source, the timestamp is shown as text.
 
 Note format v2 adds Mermaid diagrams, `==highlight==`, bold terms, GitHub alerts (`NOTE`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), GFM comparison tables, `$...$` / `$$...$$` math, and images under `notes/<deck-id>/assets/` (`.png`, `.jpg`, `.webp`, `.svg`). Image links use `assets/<filename>`; SVGs are intended to render as images rather than inline SVG. These v2 features are pending integration in this draft. See the [architecture contract](docs/architecture.md) for the merged format and the note writer's `server/marginalia/notes/style.md` once the notes branch lands.
 
@@ -316,7 +326,7 @@ The course reader is designed to offer three modes:
 | Interview / 口試 | Ask one understanding question at a time, wait for your answer, then give feedback and a follow-up. |
 | Review / 審稿 | Check the current note against the slides and transcript, with concrete corrections and timestamps. |
 
-Drag across a slide to mark a region, or select text in a note/transcript, then ask about it in the panel. The intended account/model controls choose a detected Claude or Codex login, model, and reasoning effort. The backend supports these request fields, but the current web panel is a preview: sending messages, forwarding selections, and account/model controls are not yet fully connected.
+Drag across a slide to mark a region, or select text in a note/transcript, then ask about it in the panel. Choose a detected Claude or Codex login, model, and reasoning effort using the account/model controls. The panel sends the current slide and selection to the local backend and streams its response. This requires the API and agent backend; explicit mock mode uses simulated replies.
 
 The agent's supplied context belongs to the current course: its slide outline, current slide, notes, aligned transcript, and selection. It works from that course directory with read-only tools; this describes the intended course scope, not a guarantee of filesystem isolation. It does not edit your notes through chat. Conversations are stored in that course's `chats/` directory. Model requests still use the selected provider's service.
 
@@ -330,7 +340,7 @@ pnpm build
 
 The intended output is `apps/web/dist/`, containing a read-only reader plus exported course data. Editing, generation, and agent chat require the local backend and are hidden in static mode.
 
-**Static export is not implemented in the branches checked for this draft.** The current web build compiles frontend assets but does not yet export courses or automatically select static mode. Do not deploy that output expecting a complete course reader until export integration lands.
+**Course-data export is not implemented in the branches checked for this draft.** The web build selects static mode and compiles frontend assets, but does not export course JSON, slides, or notes. Do not deploy that output expecting a complete course reader until export integration lands.
 
 The export contract includes slides, thumbnails, notes, course/deck JSON, and transcripts. It excludes original `materials/` files and lecture video binaries. V2 note assets must also be handled by the exporter before publishing illustrated notes. Your course data may therefore become public even though `courses/` is git-ignored. Check teaching-material rights and inspect the build output before deploying it.
 
@@ -373,7 +383,7 @@ pnpm check
 (cd server && uv run ruff check . && uv run pytest -q)
 ```
 
-[CI](.github/workflows/ci.yml) runs on PRs and pushes to `main`: backend dependency sync, Ruff, and pytest; frontend install, check, and build on Node 22 when the web package exists. Backend lint failures fail CI. The bootstrap workflow treats an empty test suite as a skip and skips web checks/build before scaffolding is merged. The current backend has a test suite; these skips do not mean the full application has passed end-to-end validation.
+[CI](.github/workflows/ci.yml) runs on PRs and pushes to `main`: backend dependency sync, Ruff, and pytest; frontend install, check, and build on Node 22 when the web package exists. Backend lint failures fail CI. The frontend check runs Biome, TypeScript, and video-link unit tests. For fixture-based browser regression coverage, see [apps/web/README.md](apps/web/README.md); it uses an existing Playwright installation and does not call models or process real courses.
 
 ## License
 
