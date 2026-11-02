@@ -219,6 +219,12 @@ Chat request:
 SSE events: `{"type":"start","chatId"}`, `{"type":"text","delta"}`, `{"type":"tool","title","detail"}`,
 `{"type":"done","chatId","usage"?}`, `{"type":"error","message"}`.
 
+Claude 與 Codex 共用 `marginalia.agents.prompts.build_system(course, mode, deck, slide, selection, region)`。
+伺服器先驗證課程路徑，再預載可見簡報的投影片正文、講者備註、各頁筆記及影片逐字稿
+（包含轉錄中的 partial 檔）；逐字稿保留影片與時間連結。system prompt 統一上限為 120,000 字元，
+優先保留當頁、筆記、對齊至當頁的逐字稿、選取文字與圈選情境，其餘預算分配給整課資料，截斷會明示。
+Codex 沒有讀檔工具，所有可用課程 context 都必須由這份 prompt 提供。
+
 ## Static export (`pnpm build`)
 
 ```

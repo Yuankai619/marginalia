@@ -19,67 +19,25 @@ from ..course_access import check_course
 from ..llm import claude
 from ..store import Course, read_json, write_json
 from . import codex_chat
+from .prompts import MODES
 
 
 def _now() -> str:
     return datetime.now(UTC).astimezone().isoformat(timespec="seconds")
 
 
-def _note(course: Course, deck: str | None, slide: int | None) -> str:
-    if not deck or not slide:
-        return ""
-    try:
-        return course.note_path(deck, slide).read_text("utf-8")
-    except FileNotFoundError:
-        return ""
-
-
-MODES = {
-    "qa": "回答課程問題，說明推理依據並引用課程來源。",
-    "interview": "進行口試練習，一次只問一題，等學生回答再追問並提供回饋。",
-    "review": "審查目前筆記，指出錯誤、缺漏與可改善處，依課程證據提出具體修改建議。",
-}
-
-
 def _system(course: Course, context: dict[str, Any], mode: str = "qa") -> str:
-    return MODES[mode] + "\n" + _course_context(course, context, mode)
+    from .prompts import build_system
 
-
-def _course_context(course: Course, context: dict[str, Any], mode: str) -> str:
-    try:
-        from .prompts import build_system
-
-        return build_system(
-            course,
-            mode,
-            **{
-                k: context[k]
-                for k in ("deck", "slide", "selection", "region")
-                if k in context
-            },
-        )
-    except ImportError:
-        deck, slide = context.get("deck"), context.get("slide")
-        titles = [
-            f"{d['title']}："
-            + "、".join(s.get("title", "") for s in course.slides(d["id"])[:30])
-            for d in course.manifest()["decks"]
-        ]
-        current = (
-            next((s for s in course.slides(deck) if s.get("index") == slide), {})
-            if deck
-            else {}
-        )
-        selection = (context.get("selection") or {}).get("text", "")
-        return "\n".join(
-            [
-                "你是課程助教。使用繁體中文、依資料作答；不確定就明說。",
-                "課程投影片：" + "\n".join(titles),
-                "目前投影片：" + current.get("text", ""),
-                "目前筆記：" + _note(course, deck, slide),
-                "選取文字：" + selection,
-            ]
-        )
+    return build_system(
+        course,
+        mode,
+        **{
+            k: context[k]
+            for k in ("deck", "slide", "selection", "region")
+            if k in context
+        },
+    )
 
 
 def _region_image(course: Course, context: dict[str, Any]) -> Path | None:
@@ -171,10 +129,11 @@ async def _stream(request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
     image = _region_image(course, context)
     events = None
     try:
+        system = await asyncio.to_thread(_system, course, context, mode)
         if request.get("account", "claude") == "claude":
             call = claude.Call(
                 prompt=prompt,
-                system=_system(course, context, mode),
+                system=system,
                 images=[image] if image else [],
                 model=request.get("model", "sonnet"),
                 effort=request.get("effort"),
@@ -186,7 +145,7 @@ async def _stream(request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
             events = claude.stream(call)
         else:
             events = codex_chat.stream(
-                _system(course, context, mode) + "\n\n" + prompt,
+                system + "\n\n" + prompt,
                 request["account"],
                 request.get("model", "gpt-5"),
                 request.get("effort", "medium"),

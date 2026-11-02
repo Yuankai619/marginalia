@@ -452,3 +452,179 @@ def test_manifest_cannot_add_other_course_context(tmp_path, monkeypatch):
         assert not called
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("account", ["claude", "codex-test"])
+def test_both_providers_receive_cross_deck_notes_and_transcripts(
+    course, monkeypatch, account
+):
+    from marginalia.store import write_json
+
+    course.save_manifest(
+        {
+            "decks": [
+                {"id": "first", "source": "materials/first.pdf", "title": "第一週"},
+                {"id": "second", "source": "materials/second.pdf", "title": "第二週"},
+            ],
+            "videos": [
+                {"id": "lecture", "source": "materials/lecture.mp4"},
+                {"id": "partial", "source": "materials/partial.mp4"},
+            ],
+        }
+    )
+    write_json(
+        course.deck_path("first", "slides.json"),
+        [
+            {"index": 1, "title": "目前頁", "text": "CURRENT_TEXT"},
+            {"index": 2, "title": "其他頁", "text": "OTHER_PAGE_BODY"},
+        ],
+    )
+    write_json(
+        course.deck_path("second", "slides.json"),
+        [
+            {
+                "index": 31,
+                "title": "另一份簡報",
+                "text": "CROSS_DECK_BODY",
+                "speakerNotes": "SPEAKER_NOTES",
+            },
+        ],
+    )
+    course.note_path("first", 2).parent.mkdir(parents=True, exist_ok=True)
+    course.note_path("first", 2).write_text("OTHER_PAGE_NOTE")
+    course.note_path("second", 31).parent.mkdir(parents=True, exist_ok=True)
+    course.note_path("second", 31).write_text("CROSS_DECK_NOTE")
+    write_json(
+        course.video_path("lecture", "transcript.json"),
+        {
+            "segments": [{"start": 42.5, "end": 44, "text": "TEACHER_TRANSCRIPT"}],
+        },
+    )
+    write_json(
+        course.video_path("partial", "transcript.partial.json"),
+        {
+            "segments": [{"start": 60, "end": 62, "text": "PARTIAL_TRANSCRIPT"}],
+        },
+    )
+    captured = []
+
+    async def fake_claude(call):
+        captured.append(call.system)
+        yield {"type": "text", "delta": "fixture"}
+        yield {"type": "done"}
+
+    async def fake_codex(prompt, *args):
+        captured.append(prompt)
+        yield {"type": "text", "delta": "fixture"}
+        yield {"type": "done"}
+
+    monkeypatch.setattr(chat.claude, "stream", fake_claude)
+    monkeypatch.setattr(chat.codex_chat, "stream", fake_codex)
+    context = {"deck": "first", "slide": 1}
+
+    async def run():
+        return [
+            event
+            async for event in chat.stream(
+                {
+                    "course": course.id,
+                    "account": account,
+                    "message": "說明第二週、其他頁筆記和老師的說法",
+                    "context": context,
+                }
+            )
+        ]
+
+    asyncio.run(run())
+    system = chat._system(course, context)
+    assert captured[0].startswith(system)
+    for marker in (
+        "CURRENT_TEXT",
+        "OTHER_PAGE_BODY",
+        "CROSS_DECK_BODY",
+        "SPEAKER_NOTES",
+        "OTHER_PAGE_NOTE",
+        "CROSS_DECK_NOTE",
+        "TEACHER_TRANSCRIPT",
+        "PARTIAL_TRANSCRIPT",
+        "video:lecture?t=42",
+        "video:partial?t=60",
+    ):
+        assert marker in captured[0]
+
+
+def test_shared_course_prompt_has_one_budget_and_keeps_current_context(course):
+    from marginalia.agents import prompts
+    from marginalia.store import write_json
+
+    course.save_manifest(
+        {
+            "decks": [
+                {"id": "first", "source": "materials/first.pdf"},
+                {"id": "second", "source": "materials/second.pdf"},
+            ],
+            "videos": [{"id": "lecture", "source": "materials/lecture.mp4"}],
+        }
+    )
+    write_json(
+        course.deck_path("first", "slides.json"),
+        [
+            {
+                "index": 1,
+                "title": "目前頁",
+                "text": "CURRENT_PRIORITY" + "甲" * 200_000,
+            },
+        ],
+    )
+    write_json(
+        course.deck_path("second", "slides.json"),
+        [
+            {
+                "index": 1,
+                "title": "第二週",
+                "text": "OTHER_DECK_PRIORITY" + "乙" * 200_000,
+            },
+        ],
+    )
+    write_json(
+        course.video_path("lecture", "transcript.json"),
+        {
+            "segments": [
+                {"start": 0, "end": 1, "text": "舊" * 200_000},
+                {"start": 900, "end": 905, "text": "CURRENT_TRANSCRIPT_PRIORITY"},
+            ],
+        },
+    )
+    write_json(
+        course.path("generated", "alignment.json"),
+        {
+            "segments": [
+                {
+                    "video": "lecture",
+                    "deck": "first",
+                    "slide": 1,
+                    "start": 900,
+                    "end": 910,
+                }
+            ],
+        },
+    )
+    system = prompts.build_system(
+        course,
+        "qa",
+        "first",
+        1,
+        selection={"text": "SELECTED_PRIORITY" + "選" * 10_000},
+        region={"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+    )
+    assert len(system) <= prompts.PROMPT_CHARS
+    assert all(
+        marker in system
+        for marker in (
+            "CURRENT_PRIORITY",
+            "OTHER_DECK_PRIORITY",
+            "SELECTED_PRIORITY",
+            "CURRENT_TRANSCRIPT_PRIORITY",
+        )
+    )
+    assert "已截斷" in system
