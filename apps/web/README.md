@@ -22,7 +22,21 @@ pnpm --filter @marginalia/web exec vite preview --host 127.0.0.1 --port 5191
 node scripts/web-regression.cjs
 ```
 
-可用 `WEB_LOCAL_URL`／`WEB_STATIC_URL` 改測試位址，`CHROME_PATH` 改瀏覽器路徑。
-測試攔截所有 API，以極小合成資料驗證 local/static HTTP 形狀、草稿保護、圖片與影片來源、圈選和選取文字、Agent SSE、multipart 上傳、掃描、工作 SSE 重連，以及 375px 手機版。
+可用 `WEB_LOCAL_URL`／`WEB_STATIC_URL` 改測試位址（例如另一個 worktree 的 Vite 跑在 5174，就設 `WEB_LOCAL_URL=http://127.0.0.1:5174`），`CHROME_PATH` 改瀏覽器路徑。
+測試攔截所有 API，以極小合成資料驗證 local/static HTTP 形狀、草稿保護、筆記檢查卡片、貼上圖片上傳、圖片與影片來源、圈選和選取文字（「問助教」）、助教 SSE、multipart 上傳、掃描、工作 SSE 重連，以及 375px 手機版。
 它不會對真實課程建立工作或呼叫模型。`WEB_SCREENSHOTS=<目錄>` 可另存桌面與手機截圖。
 `screenshots/` 只含測試生成的畫面；真實課程驗證產物保留在 git 忽略的 `.orch/`。
+
+## 開發時接別的後端
+
+`MARGINALIA_API` 決定 Vite 把 `/api`、`/files` 轉到哪裡（預設 `http://127.0.0.1:8765`）。在第二個 checkout 測試時：
+
+```sh
+MARGINALIA_API=http://127.0.0.1:8766 pnpm --filter @marginalia/web dev --port 5174
+```
+
+## 元件來源
+
+`src/components/agent/`、`src/components/ui/`（button、popover、dialog、tooltip、resize-handle）與 `src/styles/app.css`
+的 token 和助教動畫改寫自 [open-slide](https://github.com/open-slide/open-slide)（MIT, Copyright (c) 2026 Yiwei Ho），
+檔案開頭都有註記，授權全文見 `THIRD_PARTY_NOTICES.md`。筆記編輯器用 CodeMirror 6（MIT），預覽與閱讀頁共用 `Markdown.tsx`。

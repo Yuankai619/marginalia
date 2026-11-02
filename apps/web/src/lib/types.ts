@@ -14,6 +14,10 @@ export type Deck = {
   title: string;
   slideCount: number;
   hidden?: boolean;
+  date?: string;
+  width?: number;
+  height?: number;
+  rendered?: boolean;
 };
 export type Video = {
   id: string;
@@ -21,6 +25,7 @@ export type Video = {
   duration: number;
   transcriptStatus?: string;
   source?: string;
+  date?: string;
 };
 export type Range = { video: string; start: number; end: number };
 export type Slide = {
@@ -45,7 +50,7 @@ export type DeckDetail = { deck: Deck; slides: Slide[] };
 export type Note = {
   markdown: string;
   meta: { status: NoteStatus; updatedAt?: string };
-  review: string | Record<string, unknown> | null;
+  review: unknown;
 };
 export type Transcript = { start: number; end: number; text: string };
 export type AlignmentSegment = {
@@ -74,6 +79,7 @@ export type Account = {
   id: string;
   provider: "claude" | "codex";
   label: string;
+  plan?: string;
   loggedIn: boolean;
   models: { id: string; label: string }[];
   efforts: string[];
@@ -104,14 +110,16 @@ export type ChatEvent = {
   title?: string;
   detail?: string;
   message?: string;
+  cost?: number;
 };
-export type ChatMessage = { role: string; content: string };
-export type Chat = {
+export type ChatMessage = { role: string; content: string; createdAt?: string };
+export type ChatSummary = {
   id: string;
   title: string;
   mode: string;
-  messages: ChatMessage[];
+  updatedAt?: string;
 };
+export type Chat = ChatSummary & { messages: ChatMessage[] };
 export type StaticDeck = DeckDetail & {
   notes: Record<
     string,

@@ -13,6 +13,7 @@ const slides = [1,2].map(index=>({index,title:`測試投影片 ${index}`,image:'
 const markdown = '# 合成筆記\n\n資料契約驗證 [00:12](video:video-b?t=12)。\n\n[拒絕郵件](mailto:test@example.com) [拒絕腳本](javascript:alert(1))\n\n<details><summary>補充</summary>安全的折疊文字</details>\n\n<script>window.injected=true</script><img src=x onerror="window.injected=true">';
 const deck = {deck:course.decks[0],slides,notes:{'1':{markdown},'2':{markdown:'第二頁原始筆記',meta}}};
 const account={id:'claude',provider:'claude',label:'測試帳號',loggedIn:true,models:[{id:'sonnet',label:'Sonnet'}],efforts:['medium']};
+const NOTES = 'section[aria-label="筆記"]';
 const json = (route,body)=>route.fulfill({contentType:'application/json',body:JSON.stringify(body)});
 async function fixture(page, isStatic=false) {
  const requests=[];
@@ -27,6 +28,7 @@ async function fixture(page, isStatic=false) {
   };
  });
  let saved={markdown,meta,review:null};
+ const review={findings:[{reviewer:'correctness',severity:'high',quote:'資料契約驗證',problem:'時間點對不上老師講的內容',fix:'改成 [00:14](video:video-b?t=14)'},{reviewer:'style',severity:'low',quote:'',problem:'可以加一張圖',fix:''}],unresolved:[{reviewer:'correctness',severity:'high',quote:'資料契約驗證',problem:'時間點對不上老師講的內容',fix:'改成 [00:14](video:video-b?t=14)'}],revised:true,reviewedAt:meta.updatedAt};
  const job={id:'job-1',course:'fixture',kind:'pipeline',state:'running',progress:0,message:'等待進度',steps:[]};
  let jobReads=0;
  await page.route('**/api/**',async route=>{
@@ -43,12 +45,13 @@ async function fixture(page, isStatic=false) {
     saved={markdown:JSON.parse(request.postData()).markdown,meta:{...meta,status:'edited'},review:null};
     return json(route,{meta:saved.meta});
    }
-   return json(route,path.endsWith('/1')?saved:{markdown:'第二頁原始筆記',meta,review:null});
+   return json(route,path.endsWith('/1')?{...saved,review}:{markdown:'第二頁原始筆記',meta,review:null});
   }
   if(path.endsWith('/transcript'))return json(route,{segments:[{start:14,end:18,text:'合成逐字稿'}],partial:false});
   if(path.endsWith('/accounts'))return json(route,[account]);
   if(path.endsWith('/chats'))return json(route,[]);
   if(path==='/api/agents/chat') return route.fulfill({contentType:'text/event-stream',body:'data: {"type":"start","chatId":"fixture-chat"}\r\n\r\ndata: {"type":"text","delta":"合成串流回覆"}\r\n\r\ndata: {"type":"done","chatId":"fixture-chat"}\r\n\r\n'});
+  if(path.endsWith('/decks/deck/assets'))return json(route,{path:'assets/pasted-0123456789.png'});
   if(path.endsWith('/upload'))return json(route,{saved:['materials/tiny.pdf'],manifest:{decks:[],videos:[]}});
   if(path.endsWith('/scan'))return json(route,{decks:[],videos:[]});
   if(path.endsWith('/jobs'))return json(route,{id:job.id});
@@ -82,7 +85,7 @@ async function unicodeVideoLinks(browser, base, isStatic) {
   await page.route('https://example.com/public-videos/**',route=>route.abort());
   await page.goto(base+'/c/fixture/d/deck/1');
   await page.getByRole('button',{name:'中文影片',exact:true}).waitFor();
-  assert.equal(await page.locator('.note-column .timestamp').count(),3);
+  assert.equal(await page.locator(NOTES+' button.timestamp').count(),3);
   for(const [label,video] of [['中文影片','chinese'],['編碼影片','chinese'],['ASCII影片','ascii']]){
    await page.getByRole('button',{name:label,exact:true}).click();
    const expected=isStatic?`https://example.com/public-videos/${video}.mp4`:`/files/fixture/materials/${video==='ascii'?'test':video}.mp4`;
@@ -94,100 +97,153 @@ async function unicodeVideoLinks(browser, base, isStatic) {
   console.log(`PASS Unicode literal/encoded timestamps and manifest lookup in ${isStatic?'static':'local'} mode`);
  }finally{await page.close();}
 }
+async function mermaidStaysLocal(browser, base) {
+ const page=await browser.newPage();
+ try {
+  await fixture(page);
+  const remote=[];
+  await page.route('https://evil.example/**',route=>{remote.push(route.request().url());route.abort();});
+  const diagram=[
+   '```mermaid\n%%{init: {"themeCSS": ".node rect { fill: url(https://evil.example/theme) }"}}%%\nflowchart LR\n  A["<img src=\'https://evil.example/label.png\' width=\'20\'> 標籤"] --> B["下一步"]\n```',
+   '```mermaid\nflowchart TD\n  C@{ img: "https://evil.example/shape.png", label: "圖", pos: "t", w: 60, h: 60, constraint: "on" }\n```',
+   '![遠端圖](https://evil.example/md.png)',
+  ].join('\n\n');
+  await page.route('**/api/courses/fixture/decks/deck/notes/1',route=>json(route,{markdown:diagram,meta,review:null}));
+  await page.goto(base+'/c/fixture/d/deck/1');
+  await page.locator('.mermaid-block svg').first().waitFor();
+  await page.waitForTimeout(1500);
+  assert.deepEqual(remote,[]);
+  // The label diagram renders; the image-shape one may fall back to source text once its image is blocked.
+  assert.equal(await page.locator('.mermaid-block').count(),2);
+  assert.equal(await page.locator('.mermaid-block img, .mermaid-block image').count(),0);
+  console.log('PASS mermaid and markdown images never load remote URLs');
+ }finally{await page.close();}
+}
 async function run() {
  const browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/usr/bin/google-chrome',args:['--no-sandbox']});
  const errors=[];
  try {
-  const page=await browser.newPage({viewport:{width:1440,height:1000}});
+  const context=await browser.newContext({viewport:{width:1440,height:1000}});
+  await context.addInitScript(()=>localStorage.setItem('marginalia:panes',JSON.stringify({slides:true,notes:true,agent:true})));
+  const page=await context.newPage();
   page.on('pageerror',e=>errors.push(e.message));
   const state=await fixture(page);
   await page.goto(local+'/c/fixture/d/deck/1');
-  await page.locator('.note-column .timestamp').waitFor();
-  assert.equal(await page.locator('.slide-canvas img').getAttribute('src'),'/fixture.svg');
-  assert.equal(await page.locator('.note-column a[href^="mailto:"]').count(),0);
-  assert.equal(await page.locator('.note-column script,.note-column img').count(),0);
+  await page.locator(NOTES+' .timestamp').first().waitFor();
+  assert.equal(await page.locator('section[aria-label="投影片"] img[alt^="第 1 頁"]').getAttribute('src'),'/fixture.svg');
+  assert.equal(await page.locator(NOTES+' a[href^="mailto:"]').count(),0);
+  assert.equal(await page.locator(NOTES+' script,'+NOTES+' .prose-note img').count(),0);
   assert.equal(await page.evaluate(()=>window.injected),undefined);
+  // Review records render as cards, never as JSON.
+  await page.getByRole('tab',{name:/筆記檢查/}).click();
+  await page.getByText('時間點對不上老師講的內容').waitFor();
+  await page.getByText('需要修正',{exact:true}).waitFor();
+  await page.getByText('已自動修正 1 項').waitFor();
+  assert(!(await page.locator(NOTES).innerText()).includes('"findings"'));
+  await page.getByRole('tab',{name:'筆記',exact:true}).click();
+  // Draft protection.
   await page.getByRole('button',{name:'編輯',exact:true}).click();
-  await page.locator('.editor').fill('尚未儲存的草稿');
-  await page.locator('.editor').press('ArrowRight');assert(page.url().endsWith('/1'));
+  const editor=page.locator('.cm-content');
+  await editor.fill('尚未儲存的草稿');
+  await page.getByText('有尚未儲存的修改').waitFor();
+  await editor.press('ArrowRight');assert(page.url().endsWith('/1'));
   await page.getByRole('button',{name:'下一頁'}).click();
   await page.getByRole('dialog').waitFor();
   await page.getByRole('button',{name:'繼續編輯'}).click();
   await page.getByRole('dialog').waitFor({state:'hidden'});
-  assert.equal(await page.locator('.editor').inputValue(),'尚未儲存的草稿');
-  await page.locator('.editor').press('Control+s');
-  await page.waitForFunction(()=>document.querySelector('.editor')?.disabled);
-  await page.locator('.status.edited').waitFor();
+  assert.equal(await editor.innerText(),'尚未儲存的草稿');
+  // Pasting an image uploads it and inserts the assets/ path.
+  await editor.evaluate(element=>{
+   const data=new DataTransfer();data.items.add(new File([new Uint8Array([137,80,78,71])],'pasted.png',{type:'image/png'}));
+   element.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
+  });
+  await page.waitForFunction(()=>document.querySelector('.cm-content')?.innerText.includes('](assets/pasted-0123456789.png)'));
+  await editor.press('Control+s');
+  await page.getByText('儲存中…').waitFor();
+  await page.getByText(/已儲存/).waitFor();
+  assert(JSON.parse(state.requests.find(r=>r.method==='PUT').body).markdown.startsWith('尚未儲存的草稿'));
+  await page.getByRole('button',{name:'完成',exact:true}).click();
+  await page.getByText('你改過',{exact:true}).waitFor();
   await page.getByRole('button',{name:'編輯',exact:true}).click();
-  await page.locator('.editor').fill(markdown);
+  await editor.fill(markdown);
   await page.getByRole('button',{name:'儲存',exact:true}).click();
-  await page.locator('.note-column .timestamp').click();
+  await page.getByText(/已儲存/).waitFor();
+  await page.getByRole('button',{name:'完成',exact:true}).click();
+  await page.locator(NOTES+' button.timestamp').first().click();
   assert((await page.locator('video').getAttribute('src')).endsWith('/files/fixture/materials/test.mp4'));
   await page.getByRole('button',{name:'關閉播放器'}).click();
   // Region must use fractional coordinates relative to the displayed image.
-  const bounds=await page.locator('.slide-canvas img').boundingBox();
+  const bounds=await page.locator('section[aria-label="投影片"] img[alt^="第 1 頁"]').boundingBox();
   await page.mouse.move(bounds.x+bounds.width*.2,bounds.y+bounds.height*.2);await page.mouse.down();
   await page.mouse.move(bounds.x+bounds.width*.6,bounds.y+bounds.height*.6);await page.mouse.up();
-  await page.getByRole('button',{name:'口試',exact:true}).click();
-  await page.getByPlaceholder('問這一頁的概念…').fill('測試區域');
-  await page.getByRole('button',{name:'傳送',exact:true}).click();
+  await page.getByText('投影片框選範圍').waitFor();
+  await page.getByRole('button',{name:'口試練習',exact:true}).click();
+  await page.getByLabel('輸入問題').fill('測試區域');
+  await page.getByRole('button',{name:'送出',exact:true}).click();
   await page.getByText('合成串流回覆',{exact:true}).waitFor();
   const chat=JSON.parse(state.requests.find(r=>r.path==='/api/agents/chat').body);
   assert.equal(chat.mode,'interview');assert.equal(chat.context.deck,'deck');assert.equal(chat.context.slide,1);
   assert(Math.abs(chat.context.region.x-.2)<.01);assert(Math.abs(chat.context.region.w-.4)<.01);
   await page.getByRole('button',{name:'下一頁'}).click();await page.waitForURL('**/2');
-  await page.locator('.note-column').getByText('第二頁原始筆記',{exact:true}).waitFor();
+  await page.locator(NOTES).getByText('第二頁原始筆記',{exact:true}).waitFor();
   await page.getByText('合成串流回覆',{exact:true}).waitFor();
   await page.getByRole('button',{name:'編輯',exact:true}).click();
-  await page.locator('.editor').fill('應被放棄的第二頁草稿');
+  await editor.fill('應被放棄的第二頁草稿');
+  await page.getByText('有尚未儲存的修改').waitFor();
   assert(await page.evaluate(()=>{const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;}));
   await page.getByRole('button',{name:'上一頁'}).click();
   await page.getByRole('dialog').waitFor();
-  await page.getByRole('button',{name:'放棄修改',exact:true}).click();await page.waitForURL('**/1');
-  await page.locator('.note-column .timestamp').waitFor();
-  if(process.env.WEB_SCREENSHOTS){fs.mkdirSync(process.env.WEB_SCREENSHOTS,{recursive:true});await page.screenshot({path:process.env.WEB_SCREENSHOTS+'/reader-desktop.png',fullPage:true});}
+  await page.getByRole('button',{name:'不儲存',exact:true}).click();await page.waitForURL('**/1');
+  await page.locator(NOTES+' .timestamp').first().waitFor();
+  if(process.env.WEB_SCREENSHOTS){fs.mkdirSync(process.env.WEB_SCREENSHOTS,{recursive:true});await page.waitForTimeout(4500);await page.screenshot({path:process.env.WEB_SCREENSHOTS+'/reader-desktop.png'});}
   await page.setViewportSize({width:375,height:812});
+  await page.getByRole('tab',{name:'筆記',exact:true}).first().click();
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),375);
-  if(process.env.WEB_SCREENSHOTS)await page.screenshot({path:process.env.WEB_SCREENSHOTS+'/reader-mobile.png',fullPage:true});
-  await page.locator('.note-column .markdown').evaluate(element=>{
-   const range=document.createRange();range.selectNodeContents(element.querySelector('h1'));
+  if(process.env.WEB_SCREENSHOTS){await page.waitForTimeout(600);await page.screenshot({path:process.env.WEB_SCREENSHOTS+'/reader-mobile.png'});}
+  // Selecting note text offers 問助教, which carries the selection into the chat.
+  await page.locator(NOTES+' .prose-note h1').evaluate(element=>{
+   const range=document.createRange();range.selectNodeContents(element);
    const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
-   element.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));
   });
-  await page.getByPlaceholder('問這一頁的概念…').fill('測試選取文字');
-  await page.getByRole('button',{name:'傳送',exact:true}).click();
-  await page.waitForFunction(()=>document.querySelectorAll('.messages .markdown').length===4&&!document.querySelector('.messages')?.textContent.includes('回覆中…'));
+  await page.getByRole('button',{name:'問助教'}).click();
+  await page.getByLabel('輸入問題').fill('測試選取文字');
+  await page.getByRole('button',{name:'送出',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('.prose-chat').length===2&&!!document.querySelector('[aria-label="送出"]'));
   const selectionChat=JSON.parse(state.requests.filter(r=>r.path==='/api/agents/chat').at(-1).body);
   assert.deepEqual(selectionChat.context.selection,{text:'合成筆記',source:'note'});
-  await page.locator('.reader-heading a').click();
+  await page.getByRole('link',{name:`回到${info.title}`}).click();
   await page.getByRole('heading',{name:info.title,exact:true}).waitFor();
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),375);
   await page.locator('input[type=file]').setInputFiles({name:'tiny.pdf',mimeType:'application/pdf',buffer:Buffer.from('%PDF fixture')});
-  await page.getByText('檔案已匯入',{exact:true}).waitFor();
+  await page.getByText('已匯入 1 個檔案',{exact:true}).waitFor();
   const upload=state.requests.find(r=>r.path.endsWith('/upload'));
   assert(upload.headers['content-type'].includes('multipart/form-data; boundary='));assert(upload.body.includes('name="files[]"'));
   await page.getByRole('button',{name:'重新掃描'}).click();await page.getByText('掃描完成',{exact:true}).waitFor();
-  await page.getByRole('button',{name:'開始生成'}).click();await page.waitForFunction(()=>window.sources.length===1);
+  await page.getByRole('button',{name:'產生筆記'}).click();
+  await page.getByRole('dialog').getByRole('button',{name:'開始'}).click();
+  await page.waitForFunction(()=>window.sources.length===1);
   await page.evaluate(job=>window.sources[0].emit('job',{...job,progress:.5,message:'執行中'}),state.job);
   await page.getByText('50%',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>window.sources.length),1);
   state.job.progress=1;state.job.state='done';state.job.message='已完成';
   await page.evaluate(()=>window.sources[0].emit('open',{}));
   await page.getByText('100%',{exact:true}).waitFor();assert(state.jobReads()>=2);assert(await page.evaluate(()=>window.sources[0].closed));
-  await page.close();
-  const staticPage=await browser.newPage();staticPage.on('pageerror',e=>errors.push(e.message));
+  await context.close();
+  const staticPage=await browser.newPage({viewport:{width:1440,height:1000}});staticPage.on('pageerror',e=>errors.push(e.message));
   const staticState=await fixture(staticPage,true);
   await staticPage.goto(preview+'/c/fixture/d/deck/1');
-  await staticPage.locator('.note-column .timestamp').waitFor();
-  assert.equal(await staticPage.locator('.agent,.editor,.note-tools button').count(),0);
+  await staticPage.locator(NOTES+' button.timestamp').first().waitFor();
+  assert.equal(await staticPage.getByRole('button',{name:'編輯',exact:true}).count(),0);
+  assert.equal(await staticPage.locator('aside[aria-label="AI 助教"],.cm-content').count(),0);
   assert.equal(staticState.requests.length,0);
   course.info.videoUrls={};
-  await staticPage.reload();await staticPage.locator('.note-column .markdown').waitFor();
-  assert.equal(await staticPage.locator('.timestamp').count(),0);
-  assert((await staticPage.locator('.note-column .markdown').innerText()).includes('00:12'));
+  await staticPage.reload();await staticPage.locator(NOTES+' .prose-note').waitFor();
+  assert.equal(await staticPage.locator('button.timestamp').count(),0);
+  assert((await staticPage.locator(NOTES+' .prose-note').innerText()).includes('00:12'));
+  await mermaidStaysLocal(browser,local);
   await unicodeVideoLinks(browser,local,false);
   await unicodeVideoLinks(browser,preview,true);
   assert.deepEqual(errors,[]);
-  console.log('PASS: local/static contracts, draft protection, real images/video source, region/chat SSE, upload/scan, stable job SSE/reconnect, mobile overflow, URL sanitization');
+  console.log('PASS: local/static contracts, draft protection, review cards, image paste, real images/video source, region/chat SSE, upload/scan, stable job SSE/reconnect, mobile overflow, URL sanitization');
  } finally {await browser.close();}
 }
 run().catch(error=>{console.error(error);process.exitCode=1;});
