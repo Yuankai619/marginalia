@@ -52,7 +52,7 @@ class Material:
     ranges: list[dict]
     lines: list[dict] = field(default_factory=list)  # {video, start, text}
     partial: bool = False  # some on-screen range has no transcript yet
-    untaught: bool = False  # this deck was aligned, but this slide has no on-screen ranges
+    untaught: bool = False  # slide-only writing: unshown or skimmed without an explanation
 
     inputs: str = ""  # fingerprint of everything alignment/transcription contributed to this slide
 
@@ -178,7 +178,8 @@ def render(m: Material) -> str:
             spans += f"，另有 {len(m.ranges) - MAX_RANGES} 段"
         parts.append(f"### 這頁出現在影片的時間\n{spans}")
     else:
-        parts.append("### 這頁出現在影片的時間\n（對齊結果裡這頁沒有出現在任何影片上）")
+        note = "本頁只依投影片整理，不使用影片片段或逐字稿。" if m.untaught else "對齊結果裡這頁沒有出現在任何影片上"
+        parts.append(f"### 這頁出現在影片的時間\n（{note}）")
     if m.lines:
         note = "\n（注意：逐字稿還在轉錄中，這頁後段可能缺字。）" if m.partial else ""
         parts.append(

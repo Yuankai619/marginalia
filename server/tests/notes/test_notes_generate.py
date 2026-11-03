@@ -347,10 +347,10 @@ def test_untaught_resume_when_video_arrives(course, calls, status):
         assert generate.LINKS_RULE in calls[0].prompt
 
 
-def test_legacy_not_shown_is_migrated_but_model_skip_is_kept(course, calls):
-    notefile.write(course.note_path("d1", 3), {"status": "skipped", "sources": []}, generate.NOT_SHOWN)
+def test_legacy_skipped_notes_are_migrated(course, calls):
+    notefile.write(course.note_path("d1", 3), {"status": "skipped", "sources": []}, "對齊結果裡這頁沒有出現在影片上，老師沒有講解這頁。")
     notefile.write(course.note_path("d1", 1), {"status": "skipped"}, "只有標題")
-    assert generate.generate_deck(course, "d1")["generated"] == [2, 3]
+    assert generate.generate_deck(course, "d1")["generated"] == [1, 2, 3]
     assert notefile.read(course.note_path("d1", 3))[0]["untaught"] is True
     calls.clear()
     assert generate.generate_deck(course, "d1")["generated"] == [] and not calls

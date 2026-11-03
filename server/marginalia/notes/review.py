@@ -19,7 +19,14 @@ from ..llm import claude, codex
 from ..store import Course, write_json
 from . import notefile, rules
 from .batch import Progress, run_slides, select
-from .generate import STYLE, UNTAUGHT_RULE, meta, parse_output, untaught_body
+from .generate import (
+    STYLE,
+    UNTAUGHT_RULE,
+    meta,
+    parse_output,
+    slide_only_draft,
+    untaught_body,
+)
 from .generate import SYSTEM as WRITER_SYSTEM
 from .material import NOTE_CHARS, Gatherer, Material, clip, render
 
@@ -169,8 +176,8 @@ class Reviewer:
         findings.sort(key=lambda f: SEVERITIES.index(f["severity"]))
         return findings, errors
 
-    async def _revise(self, m: Material, body: str, findings: list[dict]) -> tuple[str, str, list[dict]]:
-        """Revise until the local rules pass, at most MAX_REVISIONS rounds. Returns (status, body, unresolved):
+    async def _revise(self, m: Material, body: str, findings: list[dict]) -> tuple[Material, str, str, list[dict]]:
+        """Revise until the local rules pass, at most MAX_REVISIONS rounds. Returns (material, status, body, unresolved):
         status stays "generated" while anything high/medium is left, so a later run picks the note up again."""
         current, todo = body, findings
         for _ in range(MAX_REVISIONS):
@@ -178,11 +185,14 @@ class Reviewer:
             status, new = parse_output(reply)
             if not new:
                 break
+            if status == "skipped" and not m.untaught:
+                async with self.sem:
+                    m, status, new = await slide_only_draft(m)
             if m.untaught:
                 new = untaught_body(new, skipped=status == "skipped")
             if status == "skipped":
                 if not (m.untaught and rules.check_links(new, m)):
-                    return "skipped", new, []
+                    return m, "skipped", new, []
                 new = untaught_body(new)
             current = new
             todo = blocking(rules.check(current, m))
@@ -191,8 +201,8 @@ class Reviewer:
                              "problem": f"修訂後有 {len(current)} 字，超過自動審稿上限 {NOTE_CHARS} 字。"})  # fmt: skip
                 break
             if not todo:
-                return "reviewed", current, []
-        return "generated", current, todo if current != body else blocking(findings)
+                return m, "reviewed", current, []
+        return m, "generated", current, todo if current != body else blocking(findings)
 
     def _too_long(self, path: Path, base: str | None, m: Material, body: str) -> tuple[str, dict] | None:
         problem = f"筆記有 {len(body)} 字，超過自動審稿上限 {NOTE_CHARS} 字，只做了規則檢查，沒有送審也沒有修訂。"
@@ -237,7 +247,7 @@ class Reviewer:
         if not force and notefile.protected(front):
             outcome, status, final, unresolved = "kept", None, body, []
         elif blocking(findings):
-            status, final, unresolved = await self._revise(m, body, findings)
+            m, status, final, unresolved = await self._revise(m, body, findings)
             outcome = "unresolved" if unresolved else "reviewed"
         else:
             outcome, status, final, unresolved = "reviewed", "reviewed", body, []
