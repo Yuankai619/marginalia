@@ -2,11 +2,10 @@
 // (docs/architecture.md, Exam prep), tested against server/tests/exam/grade_cases.json.
 import type { Answer, Question, QuestionResult } from "./exam-types";
 
-export const OBJECTIVE = new Set(["choice", "fill"]);
 export const SUBJECTIVE = new Set(["short", "essay", "calc"]);
 
 // Upper then lower, as grade.normalize does: folds ß to ss like Python's casefold() would.
-export const normalize = (text: string) =>
+const normalize = (text: string) =>
   text
     .normalize("NFKC")
     .replace(/\s+/g, " ")

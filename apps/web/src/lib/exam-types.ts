@@ -63,6 +63,11 @@ export type Attempt = {
   gradings: Record<string, Grading[]>;
 };
 
+export type AttemptSummary = Pick<
+  Attempt,
+  "id" | "submittedAt" | "score" | "maxScore"
+>;
+
 export type ExamScope = { decks: string[]; videos?: string[] };
 export type ExamOptions = {
   questionCount?: number;
@@ -108,11 +113,6 @@ export type ExamDetail = {
 export type Section = SectionMeta & { markdown: string };
 export type StaticExam = {
   exam: ExamInfo;
-  handout: {
-    section: number;
-    title: string;
-    markdown: string;
-    meta: { status: SectionMeta["status"]; updatedAt?: string };
-  }[];
+  handout: Section[];
   quiz: Quiz | null;
 };

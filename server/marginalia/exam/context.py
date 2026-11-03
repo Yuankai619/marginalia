@@ -14,8 +14,8 @@ from typing import Literal
 from .. import config
 from ..llm import claude, codex
 from ..notes import notefile
-from ..notes.material import Gatherer
-from ..store import Course
+from ..notes.material import MIN_RANGE, PAD, load_transcript
+from ..store import Course, slide_name
 from .store import Exam
 
 Progress = Callable[[float, str], None]
@@ -85,9 +85,8 @@ async def call_model(
         call = claude.Call(prompt=prompt, system=system, images=list(images), model=model or config.WRITER_MODEL,
                            effort=engine.effort, tools=[])  # fmt: skip
         return await claude.complete(call)
-    home = Path.home() / (".codex" if engine.account == "codex" else f".{engine.account}")
     text = f"{system}\n\n{prompt}" if system else prompt
-    return await codex.complete(text, codex_home=home, model=model, images=list(images))
+    return await codex.complete(text, codex_home=codex.account_home(engine.account), model=model, images=list(images))
 
 
 @dataclass
@@ -109,8 +108,7 @@ class ExamContext:
 
 def scope_decks(course: Course, exam: dict) -> list[dict]:
     """Decks in scope, in scope order; an empty scope is every visible deck."""
-    hidden = set(course.info().get("hiddenDecks") or [])
-    decks = [d for d in course.manifest()["decks"] if d["id"] not in hidden and not d.get("hidden")]
+    decks = course.visible_decks()
     wanted = exam.get("scope", {}).get("decks") or []
     if not wanted:
         return decks
@@ -118,21 +116,46 @@ def scope_decks(course: Course, exam: dict) -> list[dict]:
     return [by_id[d] for d in wanted if d in by_id]
 
 
+def _slide_lines(course: Course, decks: list[dict], videos: set[str]) -> dict[tuple[str, int], list[dict]]:
+    """Transcript lines spoken while each slide was on screen, reading alignment and each transcript once.
+    Same windows as notes (material.Gatherer): stretches under MIN_RANGE are dropped unless nothing else is left,
+    and lines within PAD seconds of a stretch count."""
+    wanted = {d["id"] for d in decks}
+    ranges: dict[tuple[str, int], list[dict]] = {}
+    for seg in course.alignment().get("segments", []):
+        if seg.get("deck") in wanted and seg.get("slide") and (not videos or seg["video"] in videos):
+            ranges.setdefault((seg["deck"], seg["slide"]), []).append(seg)
+    transcripts: dict[str, list[dict]] = {}
+    out = {}
+    for key, every in ranges.items():
+        lines: list[dict] = []
+        for r in [r for r in every if r["end"] - r["start"] >= MIN_RANGE] or every:
+            if r["video"] not in transcripts:
+                transcripts[r["video"]] = load_transcript(course, r["video"])[0]
+            for seg in transcripts[r["video"]]:
+                if seg["end"] > r["start"] - PAD and seg["start"] < r["end"] + PAD:
+                    line = {"video": r["video"], "start": seg["start"], "text": seg["text"]}
+                    if not lines or lines[-1] != line:
+                        lines.append(line)
+        out[key] = lines
+    return out
+
+
 def load(exam: Exam, engine: Engine | None = None) -> ExamContext:
     course, info = exam.course, exam.info()
-    videos = set(info["scope"].get("videos") or [])
+    in_scope = scope_decks(course, info)
+    lines = _slide_lines(course, in_scope, set(info["scope"].get("videos") or []))
     decks = []
-    for deck in scope_decks(course, info):
-        g = Gatherer(course, deck["id"])
+    for deck in in_scope:
         slides = []
-        for s in g.slides:
-            m = g.get(s["index"])
-            note = notefile.read(course.note_path(deck["id"], s["index"]))
-            lines = [ln for ln in m.lines if not videos or ln["video"] in videos]
+        for s in course.slides(deck["id"]):
+            index = s["index"]
+            note = notefile.read(course.note_path(deck["id"], index))
+            image = course.deck_dir(deck["id"]) / "slides" / f"{slide_name(index)}.webp"
             slides.append(SlideDoc(
-                deck=deck["id"], index=s["index"], title=s.get("title") or "", text=s.get("text") or "",
+                deck=deck["id"], index=index, title=s.get("title") or "", text=s.get("text") or "",
                 speaker_notes=s.get("speakerNotes") or "", note=note[1] if note else "",
-                image=m.image if m.image.exists() else None, lines=lines,
+                image=image if image.exists() else None, lines=lines.get((deck["id"], index), []),
             ))  # fmt: skip
         decks.append(DeckDoc(id=deck["id"], title=deck.get("title") or deck["id"], slides=slides))
     uploads = []

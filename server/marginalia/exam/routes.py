@@ -87,9 +87,7 @@ def _scope(course: Course, value: Any) -> dict:
     if not isinstance(value, dict):
         raise _error(422, "考試範圍格式不正確")
     manifest = course.manifest()
-    hidden = set(course.info().get("hiddenDecks") or [])
-    decks = {d["id"] for d in manifest["decks"] if d["id"] not in hidden and not d.get("hidden")}
-    known = {"decks": decks, "videos": {v["id"] for v in manifest["videos"]}}
+    known = {"decks": {d["id"] for d in course.visible_decks()}, "videos": {v["id"] for v in manifest["videos"]}}
     out = {}
     for key in ("decks", "videos"):
         items = value.get(key) or []
@@ -117,10 +115,26 @@ def _options(value: Any) -> dict:
     return out
 
 
+async def check_job(course: Course, options: dict) -> None:
+    """Validate an `exam` job's options before it is queued (see POST /api/courses/{c}/jobs)."""
+    try:
+        exam = Exam(course, options.get("exam"))
+    except ValueError as exc:
+        raise _error(404, "找不到考試") from exc
+    if not exam.exists():
+        raise _error(404, "找不到考試")
+    parts = options.get("parts")
+    if parts is not None and (not isinstance(parts, list) or not parts or set(parts) - {"handout", "quiz"}):
+        raise _error(422, "產生項目不正確")
+    await engine_for(options.get("account") or "claude", options.get("model"), options.get("effort"))
+
+
 _grading_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
 
 def router(course_of: Callable[[str], Course]) -> APIRouter:
+    # Routes that only touch disk are plain `def` (FastAPI runs them in its threadpool, off the event loop);
+    # the async ones await uploads or a model call.
     api = APIRouter(prefix="/api/courses/{course_id}/exams")
 
     def exam_of(course_id: str, exam_id: str) -> Exam:
@@ -142,11 +156,11 @@ def router(course_of: Callable[[str], Course]) -> APIRouter:
         }  # fmt: skip
 
     @api.get("")
-    async def exams(course_id: str):
+    def exams(course_id: str):
         return [exam.summary() for exam in list_exams(course_of(course_id))]
 
     @api.post("")
-    async def create_exam(course_id: str, body: ExamCreate):
+    def create_exam(course_id: str, body: ExamCreate):
         course = course_of(course_id)
         try:
             exam = Exam(course, validate_id(body.id or slugify(body.title)))
@@ -160,11 +174,11 @@ def router(course_of: Callable[[str], Course]) -> APIRouter:
                                    "options": options, "hidden": False})  # fmt: skip
 
     @api.get("/{exam_id}")
-    async def get_exam(course_id: str, exam_id: str):
+    def get_exam(course_id: str, exam_id: str):
         return detail(exam_of(course_id, exam_id))
 
     @api.put("/{exam_id}")
-    async def update_exam(course_id: str, exam_id: str, body: ExamUpdate):
+    def update_exam(course_id: str, exam_id: str, body: ExamUpdate):
         exam = exam_of(course_id, exam_id)
         with exam.locked():
             return exam.save_info(_updated(exam, body))
@@ -203,7 +217,7 @@ def router(course_of: Callable[[str], Course]) -> APIRouter:
             raise _error(422, str(exc)) from exc
 
     @api.delete("/{exam_id}/uploads/{name}")
-    async def delete_upload(course_id: str, exam_id: str, name: str):
+    def delete_upload(course_id: str, exam_id: str, name: str):
         exam = exam_of(course_id, exam_id)
         try:
             exam.delete_upload(name)
@@ -216,8 +230,14 @@ def router(course_of: Callable[[str], Course]) -> APIRouter:
             raise _error(422, "講義段落編號不正確")
         return n
 
+    @api.get("/{exam_id}/handout")
+    def get_handout(course_id: str, exam_id: str):
+        exam = exam_of(course_id, exam_id)
+        return [{**meta, "markdown": found[1]} for meta in exam.sections()
+                if (found := exam.section(meta["section"])) is not None]  # fmt: skip
+
     @api.get("/{exam_id}/handout/{n}")
-    async def get_section(course_id: str, exam_id: str, n: int):
+    def get_section(course_id: str, exam_id: str, n: int):
         found = exam_of(course_id, exam_id).section(section_index(n))
         if found is None:
             raise _error(404, "找不到講義段落")
@@ -244,14 +264,14 @@ def router(course_of: Callable[[str], Course]) -> APIRouter:
             raise _error(422, "圖片路徑不正確") from exc
 
     @api.get("/{exam_id}/quiz")
-    async def get_quiz(course_id: str, exam_id: str):
+    def get_quiz(course_id: str, exam_id: str):
         quiz = exam_of(course_id, exam_id).quiz()
         if quiz is None:
             raise _error(404, "還沒有產生題目")
         return quiz
 
     @api.get("/{exam_id}/attempts")
-    async def attempts(course_id: str, exam_id: str):
+    def attempts(course_id: str, exam_id: str):
         return exam_of(course_id, exam_id).attempts()
 
     @api.post("/{exam_id}/attempts")
@@ -274,7 +294,7 @@ def router(course_of: Callable[[str], Course]) -> APIRouter:
         return attempt
 
     @api.get("/{exam_id}/attempts/{attempt_id}")
-    async def get_attempt(course_id: str, exam_id: str, attempt_id: str):
+    def get_attempt(course_id: str, exam_id: str, attempt_id: str):
         return attempt_of(exam_of(course_id, exam_id), attempt_id)
 
     @api.post("/{exam_id}/attempts/{attempt_id}/grade")

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from pathlib import Path
 from xml.etree import ElementTree
 
 from . import config
@@ -153,6 +154,30 @@ def _check_content(ext: str, data: bytes) -> None:
         raise AssetError("檔案內容和副檔名不符")
 
 
+def check_image(filename: str, data: bytes, *, svg: bool = True) -> str:
+    """Validate an image's size, extension and content; returns the normalized extension."""
+    if len(data) > MAX_BYTES:
+        raise AssetError("圖片不能超過 10 MB")
+    ext = _extension(filename)
+    if ext == "svg" and not svg:
+        raise AssetError("只能上傳 png、jpg 或 webp 圖片")
+    _check_content(ext, data)
+    return ext
+
+
+def save_image(folder: Path, root: Path, filename: str, data: bytes) -> str:
+    """Store one checked image as `<folder>/<name>-<sha256[:10]>.<ext>` (inside `root`); returns `assets/<name>`."""
+    ext = check_image(filename, data)
+    stem = slugify(filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1])[:40].strip("-_") or "image"
+    name = f"{stem}-{hashlib.sha256(data).hexdigest()[:10]}.{ext}"
+    try:
+        with exclusive_output(folder / name, root=root) as output:
+            output.write(data)
+    except FileExistsError:
+        pass  # same name and content hash: this image is already there
+    return f"assets/{name}"
+
+
 def save_asset(course: Course, deck: str, filename: str, data: bytes) -> str:
     """Store one image for `deck` and return the path notes use (`assets/<name>`)."""
     try:
@@ -161,16 +186,5 @@ def save_asset(course: Course, deck: str, filename: str, data: bytes) -> str:
         known = None
     if known is None:
         raise LookupError("找不到投影片")
-    if len(data) > MAX_BYTES:
-        raise AssetError("圖片不能超過 10 MB")
-    ext = _extension(filename)
-    _check_content(ext, data)
-    stem = slugify(filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1])[:40].strip("-_") or "image"
-    name = f"{stem}-{hashlib.sha256(data).hexdigest()[:10]}.{ext}"
-    try:
-        with exclusive_output(course.path(config.NOTES, deck, "assets", name), root=course.notes_dir) as output:
-            output.write(data)
-    except FileExistsError:
-        pass  # same name and content hash: this image is already there
-    return f"assets/{name}"
+    return save_image(course.path(config.NOTES, deck, "assets"), course.notes_dir, filename, data)
 

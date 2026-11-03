@@ -59,7 +59,7 @@ flowchart LR
     if course_id == "fixture":
         # Exam prep: handout + quiz are exported; uploads and attempts must not be.
         exam = Path(course.path("exams", "midterm"))
-        write_json(exam / "exam.json", {"title": "期中考", "scope": {"decks": ["deck", "hidden"]}})
+        write_json(exam / "exam.json", {"title": "期中考", "scope": {"decks": ["deck"]}})
         write_text(exam / "handout" / "001.md", "---\nsection: 1\ntitle: 合成講義\nstatus: generated\n---\n\n"
                    "> [!IMPORTANT]\n> ==講義重點==\n\n![投影片](slide:deck/1)\n\n![隱藏](slide:hidden/1)\n")
         write_json(exam / "quiz.json", {"version": 1, "hash": "h1", "questions": [

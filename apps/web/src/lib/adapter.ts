@@ -3,6 +3,7 @@ import { readEventStream } from "./events";
 import { gradeObjective, totals } from "./exam-grade";
 import type {
   Attempt,
+  AttemptSummary,
   ExamDetail,
   ExamInfo,
   ExamSummary,
@@ -110,7 +111,13 @@ export type DataAdapter = {
     signal?: AbortSignal,
   ): Promise<string>;
   quiz(courseId: string, examId: string): Promise<Quiz | null>;
-  attempts(courseId: string, examId: string): Promise<Attempt[]>;
+  /** Submitted attempts, newest first, as summaries; `attempt` loads one in full. */
+  attempts(courseId: string, examId: string): Promise<AttemptSummary[]>;
+  attempt(
+    courseId: string,
+    examId: string,
+    attemptId: string,
+  ): Promise<Attempt>;
   submitAttempt(
     courseId: string,
     examId: string,
@@ -288,17 +295,7 @@ const local: DataAdapter = {
         { method: "DELETE" },
       )
     ).uploads,
-  handout: async (c, e) => {
-    const { handout } = await call<ExamDetail>(examPath(c, e));
-    return Promise.all(
-      handout.map(async (meta) => {
-        const { markdown } = await call<{ markdown: string }>(
-          `${examPath(c, e)}/handout/${meta.section}`,
-        );
-        return { ...meta, markdown };
-      }),
-    );
-  },
+  handout: (c, e) => call(`${examPath(c, e)}/handout`),
   saveSection: async (c, e, n, markdown) =>
     (
       await call<{ meta: SectionMeta }>(`${examPath(c, e)}/handout/${n}`, {
@@ -322,14 +319,8 @@ const local: DataAdapter = {
     if (!response.ok) throw new Error("讀取題目失敗");
     return response.json();
   },
-  attempts: async (c, e) => {
-    const list = await call<{ id: string }[]>(`${examPath(c, e)}/attempts`);
-    return Promise.all(
-      list.map((item) =>
-        call<Attempt>(`${examPath(c, e)}/attempts/${pathSegment(item.id)}`),
-      ),
-    );
-  },
+  attempts: (c, e) => call(`${examPath(c, e)}/attempts`),
+  attempt: (c, e, a) => call(`${examPath(c, e)}/attempts/${pathSegment(a)}`),
   submitAttempt: (c, e, _quiz, body) =>
     call(`${examPath(c, e)}/attempts`, {
       method: "POST",
@@ -350,11 +341,18 @@ const local: DataAdapter = {
     }),
 };
 
-// Static mode: the exam file holds the handout and quiz; answers live in this browser only.
-const staticExam = (c: string, e: string) =>
-  call<StaticExam>(
-    siteUrl(`/data/${pathSegment(c)}/exams/${pathSegment(e)}.json`),
-  );
+// Static mode: the exam file holds the handout and quiz (fetched once); answers live in this browser only.
+const staticExams = new Map<string, Promise<StaticExam>>();
+const staticExam = (c: string, e: string) => {
+  const url = siteUrl(`/data/${pathSegment(c)}/exams/${pathSegment(e)}.json`);
+  let exam = staticExams.get(url);
+  if (!exam) {
+    exam = call<StaticExam>(url);
+    staticExams.set(url, exam);
+    exam.catch(() => staticExams.delete(url));
+  }
+  return exam;
+};
 const attemptsKey = (c: string, e: string) => `marginalia.exam.${c}.${e}`;
 const storedAttempts = (c: string, e: string): Attempt[] => {
   try {
@@ -431,27 +429,20 @@ const staticAdapter: DataAdapter = {
     return {
       exam: value.exam,
       uploads: [],
-      handout: value.handout.map((s) => ({
-        section: s.section,
-        title: s.title,
-        status: s.meta.status,
-        updatedAt: s.meta.updatedAt,
-      })),
+      handout: value.handout.map(({ markdown: _, ...meta }) => meta),
       quiz: value.quiz
         ? { hash: value.quiz.hash, questionCount: value.quiz.questions.length }
         : null,
     };
   },
-  handout: async (c, e) =>
-    (await staticExam(c, e)).handout.map((s) => ({
-      section: s.section,
-      title: s.title,
-      status: s.meta.status,
-      updatedAt: s.meta.updatedAt,
-      markdown: s.markdown,
-    })),
+  handout: async (c, e) => (await staticExam(c, e)).handout,
   quiz: async (c, e) => (await staticExam(c, e)).quiz,
   attempts: async (c, e) => storedAttempts(c, e),
+  attempt: async (c, e, a) => {
+    const found = storedAttempts(c, e).find((item) => item.id === a);
+    if (!found) throw new Error("找不到作答紀錄");
+    return found;
+  },
   submitAttempt: async (c, e, quiz, body) => {
     const results = Object.fromEntries(
       quiz.questions.map((q) => [q.id, gradeObjective(q, body.answers[q.id])]),

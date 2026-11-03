@@ -14,6 +14,7 @@ import yaml
 
 from . import config, note_assets
 from .exam.schema import clean_question
+from .exam.store import Exam, section_name
 from .notes import notefile
 from .notes.video_links import has_video_links
 from .store import (
@@ -104,45 +105,31 @@ def _note(course: Course, deck: str, index: int) -> dict | None:
         return None
     if meta.get("untaught") and status != "edited" and has_video_links(body):
         return None
-    public_meta = {"status": status}
+    return {"markdown": body, "meta": _public_meta(meta, status)}
+
+
+def _public_meta(meta: dict, status: str) -> dict:
+    public = {"status": status}
     if meta.get("updatedAt"):
-        public_meta["updatedAt"] = str(meta["updatedAt"])
-    return {"markdown": body, "meta": public_meta}
+        public["updatedAt"] = str(meta["updatedAt"])
+    return public
 
 
-def _assets(course: Course, deck: str, notes: dict, out: Path) -> None:
-    body = unquote("\n".join(note["markdown"] for note in notes.values()))
-    names = set(
-        re.findall(r"assets/([\w][\w.-]*\.(?:png|jpe?g|webp|svg))", body, re.IGNORECASE)
-    )
-    for name in sorted(names):
-        if ".." in name:
-            raise ValueError("圖片路徑不正確")
-        data = _read(course, config.NOTES, deck, "assets", name)
-        if data is None:
-            continue
-        if len(data) > note_assets.MAX_BYTES:
-            raise ValueError("圖片不能超過 10 MB")
-        note_assets._check_content(note_assets._extension(name), data)
-        _write(out, f"files/{course.id}/notes/{deck}/assets/{name}", data)
-
-
-def _exam_assets(course: Course, exam_id: str, markdown: str, out: Path) -> None:
+def _assets(course: Course, folder: tuple[str, ...], markdown: str, out: Path) -> None:
+    """Copy the flat `assets/<name>` images `markdown` references from `<course>/<folder>`, rechecked on the way."""
     names = set(re.findall(r"assets/([\w][\w.-]*\.(?:png|jpe?g|webp|svg))", unquote(markdown), re.IGNORECASE))
     for name in sorted(names):
         if ".." in name:
             raise ValueError("圖片路徑不正確")
-        data = _read(course, config.EXAMS, exam_id, "handout", "assets", name)
+        data = _read(course, *folder, name)
         if data is None:
             continue
-        if len(data) > note_assets.MAX_BYTES:
-            raise ValueError("圖片不能超過 10 MB")
-        note_assets._check_content(note_assets._extension(name), data)
-        _write(out, f"files/{course.id}/exams/{exam_id}/handout/assets/{name}", data)
+        note_assets.check_image(name, data)
+        _write(out, "/".join(("files", course.id, *folder, name)), data)
 
 
-def _section(course: Course, exam_id: str, name: str, deck_ids: set[str]) -> dict | None:
-    raw = _read(course, config.EXAMS, exam_id, "handout", name)
+def _section(course: Course, exam_id: str, n: int, deck_ids: set[str]) -> dict | None:
+    raw = _read(course, config.EXAMS, exam_id, "handout", section_name(n))
     if raw is None:
         return None
     meta, body = notefile.parse(raw.decode("utf-8"))
@@ -151,11 +138,8 @@ def _section(course: Course, exam_id: str, name: str, deck_ids: set[str]) -> dic
         return None
     if any(str(src).split("#")[0] not in deck_ids for src in meta.get("sources") or []):
         return None
-    public = {"status": status}
-    if meta.get("updatedAt"):
-        public["updatedAt"] = str(meta["updatedAt"])
-    return {"section": int(name[:3]), "title": str(meta.get("title") or f"第 {int(name[:3])} 節"),
-            "markdown": body, "meta": public}  # fmt: skip
+    return {"section": n, "title": str(meta.get("title") or f"第 {n} 節"), "markdown": body,
+            **_public_meta(meta, status)}  # fmt: skip
 
 
 def _export_exams(course: Course, out: Path, deck_ids: set[str], visible: set[str], slides: dict[str, int]) -> None:
@@ -176,14 +160,10 @@ def _export_exams(course: Course, out: Path, deck_ids: set[str], visible: set[st
         scope = info.get("scope") or {}
         if not set(scope.get("decks") or visible) <= deck_ids:
             continue
-        handout_dir = path / "handout"
-        names = sorted(
-            p.name for p in (handout_dir.iterdir() if handout_dir.is_dir() and not handout_dir.is_symlink() else [])
-            if re.fullmatch(r"\d{3}\.md", p.name) and p.name != "000.md"
-        )  # fmt: skip
-        sections = [s for s in (_section(course, exam_id, n, deck_ids) for n in names) if s]
-        for section in sections:
-            _exam_assets(course, exam_id, section["markdown"], out)
+        exam_store = Exam(course, exam_id)
+        sections = [s for s in (_section(course, exam_id, n, deck_ids) for n in exam_store.section_numbers()) if s]
+        assets = (config.EXAMS, exam_id, "handout", "assets")
+        _assets(course, assets, "\n".join(s["markdown"] for s in sections), out)
         quiz = _json(course, config.EXAMS, exam_id, "quiz.json")
         public_quiz = None
         if isinstance(quiz, dict) and isinstance(quiz.get("questions"), list):
@@ -195,14 +175,15 @@ def _export_exams(course: Course, out: Path, deck_ids: set[str], visible: set[st
                 q.pop("pastRef", None)
             text = [q.get(k, "") for q in questions for k in ("prompt", "solution")]
             text += [o["text"] for q in questions for o in q.get("options", [])]
-            _exam_assets(course, exam_id, "\n".join(text), out)
+            _assets(course, assets, "\n".join(text), out)
             public_quiz = {"hash": quiz.get("hash"), "questions": questions}
         exam = {"id": exam_id, "title": str(info.get("title") or exam_id),
                 "scope": {"decks": [d for d in scope.get("decks") or [] if d in deck_ids]}}  # fmt: skip
         _write(out, f"data/{course.id}/exams/{exam_id}.json", {"exam": exam, "handout": sections, "quiz": public_quiz})
-        summaries.append({**exam, "updatedAt": info.get("updatedAt"), "sectionCount": len(sections),
+        summaries.append({"id": exam_id, "title": exam["title"], "updatedAt": info.get("updatedAt"),
+                          "sectionCount": len(sections),
                           "questionCount": len(public_quiz["questions"]) if public_quiz else 0})  # fmt: skip
-    _write(out, f"data/{course.id}/exams.json", [{k: v for k, v in s.items() if k != "scope"} for s in summaries])
+    _write(out, f"data/{course.id}/exams.json", summaries)
 
 
 def _export_course(course: Course, out: Path, only_decks: list[str] | None) -> dict:
@@ -274,7 +255,7 @@ def _export_course(course: Course, out: Path, only_decks: list[str] | None) -> d
             slideCount=len(slides), rendered=bool(slides and slides[0].get("image"))
         )
         public_decks.append(public_deck)
-        _assets(course, deck_id, notes, out)
+        _assets(course, (config.NOTES, deck_id, "assets"), "\n".join(n["markdown"] for n in notes.values()), out)
         _write(
             out,
             f"data/{course.id}/decks/{deck_id}.json",
@@ -308,7 +289,7 @@ def _export_course(course: Course, out: Path, only_decks: list[str] | None) -> d
     _write(
         out, f"data/{course.id}/alignment.json", {"videos": {}, "segments": segments}
     )
-    visible = {d["id"] for d in manifest["decks"] if d["id"] not in hidden and not d.get("hidden")}
+    visible = {d["id"] for d in course.visible_decks()}
     _export_exams(course, out, deck_ids, visible, {d["id"]: d["slideCount"] for d in public_decks})
     _write(
         out,

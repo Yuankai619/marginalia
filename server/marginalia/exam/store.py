@@ -6,14 +6,10 @@ stay inside the course; files are written with the store's pinned-directory help
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
-import os
 import re
 import secrets
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 
 from .. import config, note_assets
@@ -79,16 +75,9 @@ class Exam:
     def exists(self) -> bool:
         return (self.dir / "exam.json").is_file()
 
-    @contextmanager
-    def locked(self) -> Iterator[None]:
-        """Serialize read-modify-write of this exam's files (attempts, uploads) across threads and processes."""
-        self.dir.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.dir, os.O_RDONLY)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
-        finally:
-            os.close(fd)
+    def locked(self):
+        """Serialize read-modify-write of exam.json and uploads: flock on the exam folder, like notes."""
+        return notefile.locked(self.path("exam.json"))
 
     # settings
     def info(self) -> dict:
@@ -131,12 +120,10 @@ class Exam:
         ext = raw.rsplit(".", 1)[-1].lower() if "." in raw else ""
         ext = {"jpeg": "jpg", "markdown": "md"}.get(ext, ext)
         if ext in IMAGE_TYPES:
-            if len(data) > note_assets.MAX_BYTES:
-                raise UploadTooLarge("圖片不能超過 10 MB")
             try:
-                note_assets._check_content(ext, data)
+                note_assets.check_image(raw, data, svg=False)
             except note_assets.AssetError as exc:
-                raise UploadError(str(exc)) from exc
+                raise (UploadTooLarge if len(data) > note_assets.MAX_BYTES else UploadError)(str(exc)) from exc
         elif ext in TEXT_TYPES:
             if not data.strip():
                 raise UploadError("文字檔是空的")
@@ -295,18 +282,7 @@ def list_exams(course: Course) -> list[Exam]:
     return out
 
 
+
 def save_handout_asset(exam: Exam, filename: str, data: bytes) -> str:
     """An image pasted into the handout editor, under the same rules as note assets; returns `assets/<name>`."""
-    if len(data) > note_assets.MAX_BYTES:
-        raise note_assets.AssetError("圖片不能超過 10 MB")
-    ext = note_assets._extension(filename)
-    note_assets._check_content(ext, data)
-    stem = slugify(filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1])[:40].strip("-_") or "image"
-    name = f"{stem}-{hashlib.sha256(data).hexdigest()[:10]}.{ext}"
-    root = exam.path("handout")
-    try:
-        with exclusive_output(root / "assets" / name, root=root) as output:
-            output.write(data)
-    except FileExistsError:
-        pass  # same name and content hash: already there
-    return f"assets/{name}"
+    return note_assets.save_image(exam.path("handout", "assets"), exam.path("handout"), filename, data)

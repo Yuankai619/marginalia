@@ -1,5 +1,5 @@
 import { BookOpen, Check, PenLine, Plus } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useBlocker } from "react-router-dom";
 import { toast } from "sonner";
 import { Markdown } from "@/components/Markdown";
@@ -20,10 +20,12 @@ export function Handout({
   courseId,
   course,
   detail,
+  source,
 }: {
   courseId: string;
   course: CourseDetail;
   detail: ExamDetail;
+  source: ImageSource;
 }) {
   const { t } = useT();
   const examId = detail.exam.id;
@@ -34,14 +36,6 @@ export function Handout({
   const [active, setActive] = useState<number | null>(null);
   const [slides, setSlides] = useState<SlidePick[]>([]);
   const main = useRef<HTMLDivElement>(null);
-  const source = useMemo<ImageSource>(
-    () => ({
-      courseId,
-      examId,
-      decks: data.editable ? undefined : course.decks.map((deck) => deck.id),
-    }),
-    [courseId, examId, course.decks],
-  );
 
   useEffect(() => {
     setSections(null);
@@ -147,6 +141,23 @@ export function Handout({
     setDraft({ section, markdown, saved: markdown });
   };
 
+  const editor = (onCancel: () => void) =>
+    draft && (
+      <SectionEditor
+        draft={draft}
+        saving={saving}
+        source={source}
+        slides={slides}
+        onChange={(markdown) => setDraft({ ...draft, markdown })}
+        onSave={() => void save(false)}
+        onDone={() => void save(true)}
+        onCancel={onCancel}
+        upload={(file, signal) =>
+          data.uploadExamAsset(courseId, examId, file, signal)
+        }
+      />
+    );
+
   if (error)
     return <EmptyState tone="error" title={t.saveFailed} description={error} />;
   if (!sections) return <LoadingState label={t.loading} />;
@@ -234,21 +245,9 @@ export function Handout({
               )}
             </header>
             {draft?.section === section.section ? (
-              <SectionEditor
-                draft={draft}
-                saving={saving}
-                source={source}
-                slides={slides}
-                onChange={(markdown) => setDraft({ ...draft, markdown })}
-                onSave={() => void save(false)}
-                onDone={() => void save(true)}
-                onCancel={() => {
-                  if (!dirty || window.confirm(t.unsavedLeave)) setDraft(null);
-                }}
-                upload={(file, signal) =>
-                  data.uploadExamAsset(courseId, examId, file, signal)
-                }
-              />
+              editor(() => {
+                if (!dirty || window.confirm(t.unsavedLeave)) setDraft(null);
+              })
             ) : (
               <Markdown markdown={section.markdown} source={source} />
             )}
@@ -256,21 +255,7 @@ export function Handout({
         ))}
         {data.editable &&
           (draft && !sections.some((s) => s.section === draft.section) ? (
-            <section className="pt-4">
-              <SectionEditor
-                draft={draft}
-                saving={saving}
-                source={source}
-                slides={slides}
-                onChange={(markdown) => setDraft({ ...draft, markdown })}
-                onSave={() => void save(false)}
-                onDone={() => void save(true)}
-                onCancel={() => setDraft(null)}
-                upload={(file, signal) =>
-                  data.uploadExamAsset(courseId, examId, file, signal)
-                }
-              />
-            </section>
+            <section className="pt-4">{editor(() => setDraft(null))}</section>
           ) : (
             <div className="pt-4">
               <Button

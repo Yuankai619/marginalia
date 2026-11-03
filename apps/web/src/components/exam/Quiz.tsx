@@ -8,7 +8,7 @@ import {
   Sparkles,
   Timer,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ModelMenu } from "@/components/agent/ModelMenu";
 import { useAgentChoice } from "@/components/agent/use-chat";
@@ -22,6 +22,7 @@ import { SUBJECTIVE } from "@/lib/exam-grade";
 import type {
   Answer,
   Attempt,
+  AttemptSummary,
   ExamDetail,
   Grading,
   Question,
@@ -29,7 +30,6 @@ import type {
   ResultStatus,
 } from "@/lib/exam-types";
 import { type Strings, useT } from "@/lib/i18n";
-import type { CourseDetail } from "@/lib/types";
 import { cn, errorMessage } from "@/lib/utils";
 
 type Draft = {
@@ -84,12 +84,12 @@ const clock = (seconds: number) => {
 /** The mock exam: answer like an online test, then 對答案 to see mistakes, solutions and agent grading. */
 export function QuizView({
   courseId,
-  course,
   detail,
+  source,
 }: {
   courseId: string;
-  course: CourseDetail;
   detail: ExamDetail;
+  source: ImageSource;
 }) {
   const { t } = useT();
   const examId = detail.exam.id;
@@ -97,18 +97,9 @@ export function QuizView({
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [attempt, setAttempt] = useState<Attempt | null>(null);
-  const [history, setHistory] = useState<Attempt[]>([]);
+  const [history, setHistory] = useState<AttemptSummary[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [onlyWrong, setOnlyWrong] = useState(false);
-  const [now, setNow] = useState(Date.now());
-  const source = useMemo<ImageSource>(
-    () => ({
-      courseId,
-      examId,
-      decks: data.editable ? undefined : course.decks.map((deck) => deck.id),
-    }),
-    [courseId, examId, course.decks],
-  );
 
   useEffect(() => {
     setQuiz(undefined);
@@ -127,11 +118,6 @@ export function QuizView({
       localStorage.setItem(draftKey(courseId, examId), JSON.stringify(draft));
     } catch {}
   }, [draft, courseId, examId]);
-  useEffect(() => {
-    if (!draft?.timer || attempt) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [draft?.timer, attempt]);
 
   if (error)
     return <EmptyState tone="error" title={t.saveFailed} description={error} />;
@@ -153,7 +139,6 @@ export function QuizView({
     : quiz.questions;
   const count = questions.filter((q) => answered(draft.answers[q.id])).length;
   const limit = (detail.exam.options?.minutes ?? 60) * 60;
-  const elapsed = (now - Date.parse(draft.startedAt)) / 1000;
   const setAnswer = (id: string, value: Answer) =>
     setDraft({ ...draft, answers: { ...draft.answers, [id]: value } });
 
@@ -165,10 +150,15 @@ export function QuizView({
       const result = await data.submitAttempt(courseId, examId, quiz, {
         answers: draft.answers,
         startedAt: draft.startedAt,
-        durationSec: Math.round(elapsed),
+        durationSec: Math.round(
+          (Date.now() - Date.parse(draft.startedAt)) / 1000,
+        ),
       });
       setAttempt(result);
-      setHistory((old) => [result, ...old.filter((a) => a.id !== result.id)]);
+      setHistory((old) => [
+        summary(result),
+        ...old.filter((a) => a.id !== result.id),
+      ]);
       window.scrollTo({ top: 0 });
     } catch (reason) {
       toast.error(t.saveFailed, { description: errorMessage(reason) });
@@ -185,7 +175,6 @@ export function QuizView({
       startedAt: new Date().toISOString(),
       timer: draft.timer,
     });
-    setNow(Date.now());
     window.scrollTo({ top: 0 });
   };
 
@@ -262,9 +251,15 @@ export function QuizView({
             <HistoryMenu
               t={t}
               history={history}
-              onOpen={(value) => {
-                setAttempt(value);
-                window.scrollTo({ top: 0 });
+              onOpen={async (id) => {
+                try {
+                  setAttempt(await data.attempt(courseId, examId, id));
+                  window.scrollTo({ top: 0 });
+                } catch (reason) {
+                  toast.error(t.saveFailed, {
+                    description: errorMessage(reason),
+                  });
+                }
               }}
             />
           )}
@@ -287,7 +282,9 @@ export function QuizView({
               onGraded={(next) => {
                 setAttempt(next);
                 setHistory((old) =>
-                  old.map((item) => (item.id === next.id ? next : item)),
+                  old.map((item) =>
+                    item.id === next.id ? summary(next) : item,
+                  ),
                 );
               }}
               courseId={courseId}
@@ -309,7 +306,6 @@ export function QuizView({
                 className="size-3.5 accent-[var(--brand)]"
                 checked={draft.timer}
                 onChange={(event) => {
-                  setNow(Date.now());
                   setDraft({
                     ...draft,
                     timer: event.target.checked,
@@ -322,20 +318,7 @@ export function QuizView({
               <Timer className="size-3.5" aria-hidden /> {t.timer}
             </label>
             {draft.timer && (
-              <span
-                role="timer"
-                className={cn(
-                  "nums text-[13px] font-medium",
-                  elapsed > limit && "text-destructive",
-                )}
-              >
-                {t.timeLeft} {clock(limit - elapsed)}
-              </span>
-            )}
-            {draft.timer && elapsed > limit && (
-              <span className="text-[12px] text-destructive max-sm:hidden">
-                {t.timeUp}
-              </span>
+              <Countdown startedAt={draft.startedAt} limit={limit} t={t} />
             )}
             <Button
               className="ml-auto"
@@ -352,14 +335,57 @@ export function QuizView({
   );
 }
 
+const summary = ({ id, submittedAt, score, maxScore }: Attempt) => ({
+  id,
+  submittedAt,
+  score,
+  maxScore,
+});
+
+/** Its own component so the per-second tick re-renders only the clock, not every question. */
+function Countdown({
+  startedAt,
+  limit,
+  t,
+}: {
+  startedAt: string;
+  limit: number;
+  t: Strings;
+}) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const left = limit - (now - Date.parse(startedAt)) / 1000;
+  return (
+    <>
+      <span
+        role="timer"
+        className={cn(
+          "nums text-[13px] font-medium",
+          left < 0 && "text-destructive",
+        )}
+      >
+        {t.timeLeft} {clock(left)}
+      </span>
+      {left < 0 && (
+        <span className="text-[12px] text-destructive max-sm:hidden">
+          {t.timeUp}
+        </span>
+      )}
+    </>
+  );
+}
+
 function HistoryMenu({
   t,
   history,
   onOpen,
 }: {
   t: Strings;
-  history: Attempt[];
-  onOpen: (attempt: Attempt) => void;
+  history: AttemptSummary[];
+  onOpen: (id: string) => void;
 }) {
   return (
     <details className="relative ml-auto">
@@ -372,7 +398,7 @@ function HistoryMenu({
           <li key={item.id}>
             <button
               type="button"
-              onClick={() => onOpen(item)}
+              onClick={() => onOpen(item.id)}
               className="flex w-full items-center justify-between rounded-[5px] px-2 py-1.5 text-left text-[12.5px] hover:bg-muted"
             >
               <span>{new Date(item.submittedAt).toLocaleString()}</span>

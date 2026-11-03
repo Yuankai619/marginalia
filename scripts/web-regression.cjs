@@ -357,6 +357,7 @@ async function examFlow(browser, base) {
   if(path.endsWith('/alignment'))return json(route,{videos:{},segments:[]});
   if(path==='/api/courses/fixture/exams')return json(route,[{id:'midterm',title:'期中考',sectionCount:2,questionCount:3}]);
   if(path==='/api/courses/fixture/exams/midterm')return method==='PUT'?json(route,{...exam,...JSON.parse(request.postData())}):json(route,{exam,uploads:[{name:'past.png',kind:'image',size:10,url:'/fixture.svg'}],handout:sections.map(({markdown,...s})=>s),quiz:{questionCount:3,hash:'h1'}});
+  if(path.endsWith('/midterm/handout'))return json(route,sections);
   const section=/\/handout\/(\d+)$/.exec(path);
   if(section){
    const n=Number(section[1]);

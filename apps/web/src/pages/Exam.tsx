@@ -1,5 +1,5 @@
 import { CircleAlert, Languages } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 import { ExamSetup } from "@/components/exam/ExamSetup";
@@ -7,6 +7,7 @@ import { Handout } from "@/components/exam/Handout";
 import { QuizView } from "@/components/exam/Quiz";
 import { Button } from "@/components/ui/button";
 import { EmptyState, LoadingState } from "@/components/ui/states";
+import type { ImageSource } from "@/lib/assets";
 import { data } from "@/lib/data";
 import type { ExamDetail } from "@/lib/exam-types";
 import { useT } from "@/lib/i18n";
@@ -24,6 +25,15 @@ export function Exam() {
   const [course, setCourse] = useState<CourseDetail | null>(null);
   const [exam, setExam] = useState<ExamDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const source = useMemo<ImageSource>(
+    () => ({
+      courseId,
+      examId,
+      // The static site has slide images only for exported decks; elsewhere show the caption.
+      decks: data.editable ? undefined : course?.decks.map((deck) => deck.id),
+    }),
+    [courseId, examId, course],
+  );
   const refresh = useCallback(
     () => data.exam(courseId, examId).then(setExam),
     [courseId, examId],
@@ -118,9 +128,14 @@ export function Exam() {
               onRefresh={refresh}
             />
           ) : current === "handout" ? (
-            <Handout courseId={courseId} course={course} detail={exam} />
+            <Handout
+              courseId={courseId}
+              course={course}
+              detail={exam}
+              source={source}
+            />
           ) : (
-            <QuizView courseId={courseId} course={course} detail={exam} />
+            <QuizView courseId={courseId} detail={exam} source={source} />
           )}
         </>
       )}

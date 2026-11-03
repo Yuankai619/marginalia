@@ -307,44 +307,32 @@ export function ExamSetup({
 
       <Panel title={t.options}>
         <div className="flex flex-wrap gap-4">
-          <label className="grid gap-1.5 text-[12.5px] font-medium">
-            {t.questionCount}
-            <input
-              type="number"
-              min={1}
-              max={100}
-              value={options.questionCount ?? ""}
-              placeholder="15"
-              onChange={(event) =>
-                setOptions({
-                  ...options,
-                  questionCount: event.target.value
-                    ? Math.max(1, Math.min(100, Number(event.target.value)))
-                    : undefined,
-                })
-              }
-              className="h-9 w-28 rounded-[6px] border border-border bg-background px-3 text-[14px] font-normal outline-none focus-visible:border-foreground/40"
-            />
-          </label>
-          <label className="grid gap-1.5 text-[12.5px] font-medium">
-            {t.minutes}
-            <input
-              type="number"
-              min={1}
-              max={600}
-              value={options.minutes ?? ""}
-              placeholder="60"
-              onChange={(event) =>
-                setOptions({
-                  ...options,
-                  minutes: event.target.value
-                    ? Math.max(1, Math.min(600, Number(event.target.value)))
-                    : undefined,
-                })
-              }
-              className="h-9 w-28 rounded-[6px] border border-border bg-background px-3 text-[14px] font-normal outline-none focus-visible:border-foreground/40"
-            />
-          </label>
+          {(
+            [
+              ["questionCount", t.questionCount, 100, "15"],
+              ["minutes", t.minutes, 600, "60"],
+            ] as const
+          ).map(([key, label, max, placeholder]) => (
+            <label key={key} className="grid gap-1.5 text-[12.5px] font-medium">
+              {label}
+              <input
+                type="number"
+                min={1}
+                max={max}
+                value={options[key] ?? ""}
+                placeholder={placeholder}
+                onChange={(event) =>
+                  setOptions({
+                    ...options,
+                    [key]: event.target.value
+                      ? Math.max(1, Math.min(max, Number(event.target.value)))
+                      : undefined,
+                  })
+                }
+                className="h-9 w-28 rounded-[6px] border border-border bg-background px-3 text-[14px] font-normal outline-none focus-visible:border-foreground/40"
+              />
+            </label>
+          ))}
         </div>
         <fieldset className="mt-3 flex flex-wrap gap-x-4 gap-y-2">
           <legend className="mb-1.5 text-[12.5px] font-medium">

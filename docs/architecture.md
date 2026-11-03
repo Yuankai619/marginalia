@@ -414,6 +414,7 @@ Same conventions as the main API (JSON, `{"detail": "<繁中>"}` errors, Origin 
 | POST | `/api/courses/{c}/exams/{e}/uploads` | multipart `files[]` | `{uploads:[upload]}`; 413/422 per rule below |
 | POST | `/api/courses/{c}/exams/{e}/uploads/text` | `{text}` (1–200,000 chars) | `upload` |
 | DELETE | `/api/courses/{c}/exams/{e}/uploads/{name}` | | `{uploads}` |
+| GET | `/api/courses/{c}/exams/{e}/handout` | | `[{section,title,status,updatedAt,sources,markdown}]` in reading order |
 | GET | `/api/courses/{c}/exams/{e}/handout/{n}` | | `{markdown, meta}` |
 | PUT | `/api/courses/{c}/exams/{e}/handout/{n}` | `{markdown}` | `{meta}`; sets `status: edited` (also creates section n = count+1) |
 | POST | `/api/courses/{c}/exams/{e}/assets` | multipart `file` | `{path:"assets/<name>"}`; note-asset rules |
@@ -430,7 +431,9 @@ like chat. Gradings of one attempt are serialized.
 
 Generation is a job: `POST /api/courses/{c}/jobs` with
 `{kind:"exam", options:{exam, parts?:["handout","quiz"], force?, account?, model?, effort?}}`. Progress, cancel and
-SSE are the normal job ones. The job result (in `job.message`) says how many sections/questions were written.
+SSE are the normal job ones. The handout and the past-paper → quiz chain run concurrently. The job result (in
+`job.message`) says how many sections/questions were written; failures raised as `jobs.JobError` (such as
+`run.ExamError`) show their message, any other error a generic one.
 
 ### Generation pipeline interface (`server/marginalia/exam/`)
 
@@ -514,7 +517,7 @@ the signatures.
 
 ```
 dist/data/<c>/exams.json                    [{id,title,updatedAt,sectionCount,questionCount}]
-dist/data/<c>/exams/<e>.json                {exam:{id,title,scope:{decks}}, handout:[{section,title,markdown,meta:{status,updatedAt?}}],
+dist/data/<c>/exams/<e>.json                {exam:{id,title,scope:{decks}}, handout:[{section,title,status,updatedAt?,markdown}],
                                              quiz:{hash, questions}|null}
 dist/files/<c>/exams/<e>/handout/assets/*   referenced handout images, revalidated like note assets
 ```

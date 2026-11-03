@@ -20,6 +20,10 @@ Listener = Callable[[Job], Awaitable[None] | None]
 CPU_KINDS = {"render", "align", "transcribe", "pipeline"}
 
 
+class JobError(RuntimeError):
+    """A job failure whose message is safe to show the user (anything else shows a generic one)."""
+
+
 def _now() -> str:
     return datetime.now(UTC).astimezone().isoformat(timespec="seconds")
 
@@ -182,8 +186,7 @@ class JobRunner:
             job.update(state="cancelled", message="已取消", finishedAt=_now())
             job["steps"][0].update(state="cancelled", message="已取消")
         except Exception as exc:  # noqa: BLE001 - job errors must become persisted state
-            shown = "尚未安裝，請先合入 K2" in str(exc) or type(exc).__name__ == "ExamError"
-            error = str(exc) if shown else "工作執行失敗"
+            error = str(exc) if isinstance(exc, JobError) else "工作執行失敗"
             job.update(
                 state="failed", error=error, message="執行失敗", finishedAt=_now()
             )
@@ -284,7 +287,7 @@ class JobRunner:
                     else importlib.import_module(module_name).review_deck
                 )
             except ImportError as exc:
-                raise RuntimeError(
+                raise JobError(
                     f"{kind} 模組尚未安裝，請先合入 K2：{exc.name}"
                 ) from exc
             decks = params.get("decks") or [d["id"] for d in course.manifest()["decks"]]

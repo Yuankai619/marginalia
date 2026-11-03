@@ -39,6 +39,11 @@ def _home(codex_home: Path | None) -> Path:
     return codex_home or Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 
 
+def account_home(account: str) -> Path:
+    """CODEX_HOME of an account id from llm/accounts.py: `codex` is ~/.codex, `codex-x` is ~/.codex-x."""
+    return Path.home() / (".codex" if account == "codex" else f".{account}")
+
+
 def login_problem(codex_home: Path | None = None) -> str | None:
     """Why this CODEX_HOME can't be used, or None when it holds a ChatGPT subscription login."""
     if shutil.which("codex") is None:

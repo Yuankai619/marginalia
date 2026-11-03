@@ -30,6 +30,12 @@ export function assetUrl(
   deckId: string,
   src: string,
 ): string | null {
+  const name = assetName(src);
+  return name && fileUrl(courseId, "notes", deckId, "assets", name);
+}
+
+/** The file name in `assets/<name>`, or null for anything that is not a plain image file in that folder. */
+function assetName(src: string): string | null {
   // remark percent-encodes non-ASCII URLs (`assets/架構圖.svg`); match the name as written in the note.
   let path = src;
   try {
@@ -39,7 +45,7 @@ export function assetUrl(
   if (!match || match[1].includes("..")) return null;
   const extension = match[1].split(".").at(-1)?.toLowerCase();
   if (!extension || !Object.hasOwn(IMAGE_FORMATS, extension)) return null;
-  return fileUrl(courseId, "notes", deckId, "assets", match[1]);
+  return match[1];
 }
 
 /** Where a markdown body's images resolve: a deck's notes, or an exam handout (docs/architecture.md, Exam prep). */
@@ -72,15 +78,9 @@ export function imageUrl(source: ImageSource, src: string): string | null {
       `${String(index).padStart(3, "0")}.webp`,
     );
   }
-  const asset = assetUrl(source.courseId, "_", src);
-  if (!asset) return null;
-  const name = asset.split("/").at(-1) ?? "";
-  return fileUrl(
-    source.courseId,
-    "exams",
-    source.examId,
-    "handout",
-    "assets",
-    decodeURIComponent(name),
+  const name = assetName(src);
+  return (
+    name &&
+    fileUrl(source.courseId, "exams", source.examId, "handout", "assets", name)
   );
 }

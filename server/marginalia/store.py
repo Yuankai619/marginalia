@@ -256,6 +256,11 @@ class Course:
         validate_id(deck_id)
         return next((d for d in self.manifest()["decks"] if d["id"] == deck_id), None)
 
+    def visible_decks(self) -> list[dict]:
+        """Decks shown to readers: not listed in `hiddenDecks` and not marked `hidden`."""
+        hidden = set(self.info().get("hiddenDecks") or [])
+        return [d for d in self.manifest()["decks"] if d["id"] not in hidden and not d.get("hidden")]
+
     def video(self, video_id: str) -> dict | None:
         validate_id(video_id)
         return next((v for v in self.manifest()["videos"] if v["id"] == video_id), None)

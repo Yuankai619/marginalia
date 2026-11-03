@@ -24,7 +24,6 @@ from . import ingest, note_assets
 from .agents import chat
 from .course_access import check_course, confined
 from .exam import routes as exam_routes
-from .exam.store import Exam
 from .jobs import JobRunner, runner
 from .llm.accounts import accounts
 from .store import (
@@ -39,8 +38,11 @@ from .store import (
 )
 
 SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
-_ASSET_UPLOAD = re.compile(r"/api/courses/[^/]+/(?:decks/[^/]+|exams/[^/]+)/assets")
-_EXAM_UPLOAD = re.compile(r"/api/courses/[^/]+/exams/[^/]+/uploads")
+# Multipart routes capped by Content-Length before parsing: (path, max bytes, message when over).
+_BODY_LIMITS = (
+    (re.compile(r"/api/courses/[^/]+/(?:decks|exams)/[^/]+/assets"), note_assets.MAX_BYTES + 64 * 1024, "圖片不能超過 10 MB"),
+    (re.compile(r"/api/courses/[^/]+/exams/[^/]+/uploads"), exam_routes.MAX_REQUEST, "一次上傳不能超過 40 MB"),
+)
 
 
 def _error(status: int, detail: str) -> HTTPException:
@@ -242,20 +244,14 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
     @app.middleware("http")
     async def limit_asset_upload(request: Request, call_next):
         # The multipart parser spools a whole file part before the route sees it, so cap it by header.
-        if request.method == "POST" and _ASSET_UPLOAD.fullmatch(request.url.path):
+        limit = next((rule for rule in _BODY_LIMITS if rule[0].fullmatch(request.url.path)), None)
+        if request.method == "POST" and limit:
             try:
                 size = int(request.headers.get("content-length", ""))
             except ValueError:
                 return JSONResponse({"detail": "需要 Content-Length"}, status_code=411)
-            if size > note_assets.MAX_BYTES + 64 * 1024:
-                return JSONResponse({"detail": "圖片不能超過 10 MB"}, status_code=413)
-        if request.method == "POST" and _EXAM_UPLOAD.fullmatch(request.url.path):
-            try:
-                size = int(request.headers.get("content-length", ""))
-            except ValueError:
-                return JSONResponse({"detail": "需要 Content-Length"}, status_code=411)
-            if size > exam_routes.MAX_REQUEST:
-                return JSONResponse({"detail": "一次上傳不能超過 40 MB"}, status_code=413)
+            if size > limit[1]:
+                return JSONResponse({"detail": limit[2]}, status_code=413)
         return await call_next(request)
 
     app.state.jobs = job_runner
@@ -527,19 +523,7 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
     async def create_job(course_id: str, body: JobRequest):
         course = _course(course_id)
         if body.kind == "exam":
-            options = body.options
-            try:
-                exam = Exam(course, options.get("exam"))
-            except ValueError as exc:
-                raise _error(404, "找不到考試") from exc
-            if not exam.exists():
-                raise _error(404, "找不到考試")
-            parts = options.get("parts")
-            if parts is not None and (not isinstance(parts, list) or not parts or set(parts) - {"handout", "quiz"}):
-                raise _error(422, "產生項目不正確")
-            await exam_routes.engine_for(
-                options.get("account") or "claude", options.get("model"), options.get("effort")
-            )
+            await exam_routes.check_job(course, body.options)
         job = await app.state.jobs.create(
             course,
             body.kind,

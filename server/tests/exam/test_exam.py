@@ -131,6 +131,7 @@ def test_handout_sections_edit_and_assets(client, course):
     assert saved["status"] == "edited" and saved["title"] == "行程"
     assert client.get(f"{base}/1").json()["markdown"] == "## 行程\n內容"
     assert client.get(f"{base}/0").status_code == 422
+    assert [s["markdown"] for s in client.get(base).json()] == ["## 行程\n內容"]
     asset = client.post("/api/courses/demo/exams/midterm/assets", files={"file": ("圖.png", PNG, "image/png")})
     assert asset.status_code == 200 and asset.json()["path"].startswith("assets/")
     bad = client.post("/api/courses/demo/exams/midterm/assets",

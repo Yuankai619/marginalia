@@ -174,7 +174,7 @@ async def agent_grade(question: dict, answer: str, engine: Engine) -> dict:
 def apply_grading(attempt: dict, question: dict, grading: dict) -> None:
     attempt.setdefault("gradings", {}).setdefault(question["id"], []).append(grading)
     attempt["results"][question["id"]] = {
-        "status": "correct" if grading["verdict"] == "correct" else grading["verdict"],
+        "status": grading["verdict"],
         "score": grading["score"], "maxScore": question["points"],
     }  # fmt: skip
     total(attempt)

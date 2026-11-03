@@ -10,6 +10,7 @@ import asyncio
 import re
 from collections.abc import Callable
 
+from ..jobs import JobError
 from ..notes import notefile
 from ..notes.rules import normalize_links
 from ..store import Course, unlink_output
@@ -23,8 +24,8 @@ MAX_QUESTIONS = 200  # a runaway (or injected) model reply must not produce an u
 _IMAGE = re.compile(r"!\[([^\]\n]*)\]\(([^)\s]*)\)")
 
 
-class ExamError(RuntimeError):
-    """A job failure whose message is safe to show the user."""
+class ExamError(JobError):
+    """A generation failure whose message is safe to show the user."""
 
 
 def fix_images(markdown: str, exam: Exam, decks: dict[str, int]) -> str:
@@ -113,38 +114,37 @@ async def agenerate(course: Course, exam_id: str, *, parts: list[str] | None = N
     if not ctx.decks:
         raise ExamError("考試範圍沒有任何簡報")
     decks = ctx.slide_count()
-    # Weights of each step in the job's progress bar.
-    plan = ([("past", 0.15)] if "quiz" in parts and ctx.uploads else []) + [(p, 0.6 if p == "handout" else 0.3) for p in parts]
-    total = sum(w for _, w in plan)
-    offset = 0.0
+    # The handout and the past-paper → quiz chain are independent: run them side by side, one progress bar.
+    weights = {"handout": 0.6 if "handout" in parts else 0.0, "quiz": 0.4 if "quiz" in parts else 0.0}
+    done = dict.fromkeys(weights, 0.0)
 
-    def step(weight: float) -> Callable[[float, str], None]:
-        start = offset
-        return lambda f, m: progress((start + weight * max(0.0, min(1.0, f))) / total, m)
+    def report(part: str, start: float = 0.0, share: float = 1.0) -> Callable[[float, str], None]:
+        def update(fraction: float, message: str) -> None:
+            done[part] = start + share * max(0.0, min(1.0, fraction))
+            progress(sum(done[k] * w for k, w in weights.items()) / sum(weights.values()), message)
 
-    messages = []
-    past_questions: list[PastQuestion] = []
-    for name, weight in plan:
-        report = step(weight)
-        if name == "past":
-            past_questions = await past.parse_uploads(ctx, report)
-        elif name == "handout":
-            sections = await handout.write_handout(ctx, report)
-            if not sections:
-                raise ExamError("模型沒有寫出任何講義段落")
-            if write_sections(exam, sections, decks, force) == "kept":
-                messages.append("講義已有你編輯過的段落，未覆寫")
-            else:
-                messages.append(f"講義 {len(sections)} 節")
-        else:
-            raw = await quiz.write_quiz(ctx, past_questions, report)
-            questions, dropped = clean_quiz(exam, raw, past_questions, decks)
-            if not questions:
-                raise ExamError("模型沒有產生任何有效題目")
-            exam.save_quiz(questions)
-            messages.append(f"題目 {len(questions)} 題" + (f"（略過 {dropped} 題格式不符）" if dropped else ""))
-        offset += weight
-    return "、".join(messages)
+        return update
+
+    async def make_handout() -> str:
+        sections = await handout.write_handout(ctx, report("handout"))
+        if not sections:
+            raise ExamError("模型沒有寫出任何講義段落")
+        if write_sections(exam, sections, decks, force) == "kept":
+            return "講義已有你編輯過的段落，未覆寫"
+        return f"講義 {len(sections)} 節"
+
+    async def make_quiz() -> str:
+        share = 0.35 if ctx.uploads else 0.0
+        past_questions = await past.parse_uploads(ctx, report("quiz", 0.0, share)) if ctx.uploads else []
+        raw = await quiz.write_quiz(ctx, past_questions, report("quiz", share, 1 - share))
+        questions, dropped = clean_quiz(exam, raw, past_questions, decks)
+        if not questions:
+            raise ExamError("模型沒有產生任何有效題目")
+        exam.save_quiz(questions)
+        return f"題目 {len(questions)} 題" + (f"（略過 {dropped} 題格式不符）" if dropped else "")
+
+    jobs = [make_handout() if part == "handout" else make_quiz() for part in parts]
+    return "、".join(await asyncio.gather(*jobs))
 
 
 def generate_exam(course: Course, exam_id: str, **kwargs) -> str:
