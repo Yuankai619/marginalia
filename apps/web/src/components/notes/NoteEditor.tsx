@@ -30,6 +30,7 @@ import {
   ListOrdered,
   MessageSquareWarning,
   PenLine,
+  Presentation,
   Table,
   Workflow,
 } from "lucide-react";
@@ -113,6 +114,95 @@ const editorTheme = EditorView.theme({
 });
 
 type Insert = (text: string, select?: [number, number]) => void;
+/** A slide the editor can insert as `![title](slide:<deck>/<index>)` (exam handouts). */
+export type SlidePick = {
+  deck: string;
+  deckTitle: string;
+  index: number;
+  title: string;
+  thumb?: string;
+};
+
+function SlidePicker({
+  slides,
+  label,
+  filterLabel,
+  onPick,
+}: {
+  slides: SlidePick[];
+  label: string;
+  filterLabel: string;
+  onPick: (slide: SlidePick) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const needle = query.trim().toLowerCase();
+  const shown = slides
+    .filter(
+      (slide) =>
+        !needle ||
+        `${slide.deckTitle} ${slide.index} ${slide.title}`
+          .toLowerCase()
+          .includes(needle),
+    )
+    .slice(0, 80);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <Hint label={label}>
+        <PopoverTrigger
+          aria-label={label}
+          onMouseDown={(event) => event.preventDefault()}
+          className="flex h-7 items-center gap-0.5 rounded-[5px] px-1.5 text-foreground/75 outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/30 aria-expanded:bg-muted"
+        >
+          <Presentation className="size-3.5" />
+          <ChevronDown className="size-3 text-muted-foreground" />
+        </PopoverTrigger>
+      </Hint>
+      <PopoverContent align="start" className="w-80 p-1.5">
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={filterLabel}
+          aria-label={filterLabel}
+          className="mb-1 h-8 w-full rounded-[5px] border border-border bg-background px-2 text-[12.5px] outline-none focus-visible:border-foreground/40"
+        />
+        <ul className="max-h-72 overflow-y-auto">
+          {shown.map((slide) => (
+            <li key={`${slide.deck}/${slide.index}`}>
+              <button
+                type="button"
+                onClick={() => {
+                  onPick(slide);
+                  setOpen(false);
+                }}
+                className="flex w-full items-center gap-2 rounded-[5px] p-1 text-left text-[12px] hover:bg-muted"
+              >
+                {slide.thumb ? (
+                  <img
+                    src={slide.thumb}
+                    alt=""
+                    loading="lazy"
+                    className="aspect-video w-14 shrink-0 rounded-[3px] border border-hairline object-cover"
+                  />
+                ) : (
+                  <span className="aspect-video w-14 shrink-0 rounded-[3px] bg-muted" />
+                )}
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">
+                    {slide.title || slide.index}
+                  </span>
+                  <span className="block truncate text-muted-foreground">
+                    {slide.deckTitle} · {slide.index}
+                  </span>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </PopoverContent>
+    </Popover>
+  );
+}
 
 /** Markdown source editor with a live preview rendered by the same component the reader uses. */
 export function NoteEditor({
@@ -124,16 +214,23 @@ export function NoteEditor({
   uploadImage,
   onTime,
   canPlay,
+  slides,
+  slideLabels = { insert: "插入投影片截圖", filter: "搜尋投影片標題" },
+  placeholderText = "用 Markdown 寫這一頁的筆記…",
 }: {
   value: string;
   onChange: (value: string) => void;
   onSave: () => void;
   source: NoteSource;
-  /** Where the lecture player is right now, for「插入目前時間」. */
-  playback: VideoTime | null;
+  /** Where the lecture player is right now, for「插入目前時間」; undefined hides the button (no player). */
+  playback?: VideoTime | null;
   uploadImage: (file: File, signal: AbortSignal) => Promise<string>;
-  onTime: (target: VideoTime) => void;
-  canPlay: (video: string) => boolean;
+  onTime?: (target: VideoTime) => void;
+  canPlay?: (video: string) => boolean;
+  /** Slides the toolbar can insert as images; without it the button is hidden. */
+  slides?: SlidePick[];
+  slideLabels?: { insert: string; filter: string };
+  placeholderText?: string;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLDivElement>(null);
@@ -241,7 +338,7 @@ export function NoteEditor({
           highlightPlugin,
           EditorView.lineWrapping,
           editorTheme,
-          placeholder("用 Markdown 寫這一頁的筆記…"),
+          placeholder(placeholderText),
           EditorView.contentAttributes.of({
             "aria-label": "筆記內容（Markdown）",
             spellcheck: "false",
@@ -450,28 +547,49 @@ export function NoteEditor({
             if (files.length) void upload(files);
           }}
         />
-        <span aria-hidden className="mx-1 h-4 w-px bg-hairline" />
-        <Hint
-          label={
-            playback
-              ? "把錄影目前播放到的時間插進筆記"
-              : "先點筆記裡的時間點或右下角播放錄影，就能插入目前時間"
-          }
-        >
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={!playback}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => playback && insert(`${timestampLink(playback)} `)}
-            className="disabled:pointer-events-auto"
-          >
-            <Clock />{" "}
-            {playback
-              ? `插入 ${timestampLabel(playback.time)}`
-              : "插入目前時間"}
-          </Button>
-        </Hint>
+        {slides && slides.length > 0 && (
+          <SlidePicker
+            slides={slides}
+            label={slideLabels.insert}
+            filterLabel={slideLabels.filter}
+            onPick={(slide) => {
+              const caption = (
+                slide.title || `${slide.deckTitle} ${slide.index}`
+              )
+                .replace(/[[\]()\\\r\n]+/g, " ")
+                .trim();
+              block(`![${caption}](slide:${slide.deck}/${slide.index})`);
+            }}
+          />
+        )}
+        {playback !== undefined && (
+          <>
+            <span aria-hidden className="mx-1 h-4 w-px bg-hairline" />
+            <Hint
+              label={
+                playback
+                  ? "把錄影目前播放到的時間插進筆記"
+                  : "先點筆記裡的時間點或右下角播放錄影，就能插入目前時間"
+              }
+            >
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!playback}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() =>
+                  playback && insert(`${timestampLink(playback)} `)
+                }
+                className="disabled:pointer-events-auto"
+              >
+                <Clock />{" "}
+                {playback
+                  ? `插入 ${timestampLabel(playback.time)}`
+                  : "插入目前時間"}
+              </Button>
+            </Hint>
+          </>
+        )}
         <Segmented
           title="編輯畫面"
           className="ml-auto"

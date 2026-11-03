@@ -13,6 +13,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
+import { ExamList } from "@/components/exam/ExamList";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -612,6 +613,7 @@ export function CourseHome() {
               </div>
             )}
           </section>
+          <ExamList courseId={courseId} />
           <section aria-labelledby="videos-title">
             <h2 id="videos-title" className="mb-3 text-[15px] font-semibold">
               上課錄影

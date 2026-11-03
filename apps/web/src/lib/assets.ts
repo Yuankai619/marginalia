@@ -41,3 +41,46 @@ export function assetUrl(
   if (!extension || !Object.hasOwn(IMAGE_FORMATS, extension)) return null;
   return fileUrl(courseId, "notes", deckId, "assets", match[1]);
 }
+
+/** Where a markdown body's images resolve: a deck's notes, or an exam handout (docs/architecture.md, Exam prep). */
+export type ImageSource =
+  | { courseId: string; deckId: string }
+  | {
+      courseId: string;
+      examId: string;
+      /** Decks whose slide images exist here; others render as caption text. */
+      decks?: string[];
+    };
+
+const SLIDE = /^slide:([\p{L}\p{N}_][\p{L}\p{N}_-]*)\/(\d{1,4})$/u;
+
+/** URL of a note or handout image, or null for anything that is not one of the allowed forms. */
+export function imageUrl(source: ImageSource, src: string): string | null {
+  if (!("examId" in source))
+    return assetUrl(source.courseId, source.deckId, src);
+  const slide = SLIDE.exec(src);
+  if (slide) {
+    const index = Number(slide[2]);
+    if (index < 1 || (source.decks && !source.decks.includes(slide[1])))
+      return null;
+    return fileUrl(
+      source.courseId,
+      "generated",
+      "decks",
+      slide[1],
+      "slides",
+      `${String(index).padStart(3, "0")}.webp`,
+    );
+  }
+  const asset = assetUrl(source.courseId, "_", src);
+  if (!asset) return null;
+  const name = asset.split("/").at(-1) ?? "";
+  return fileUrl(
+    source.courseId,
+    "exams",
+    source.examId,
+    "handout",
+    "assets",
+    decodeURIComponent(name),
+  );
+}

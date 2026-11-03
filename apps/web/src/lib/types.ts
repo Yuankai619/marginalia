@@ -73,6 +73,7 @@ export type Job = {
   state: "queued" | "running" | "done" | "failed" | "cancelled";
   progress: number;
   message: string;
+  error?: string;
   steps: { name: string; state: string; progress: number; message: string }[];
 };
 export type Account = {

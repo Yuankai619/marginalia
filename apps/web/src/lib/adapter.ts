@@ -1,5 +1,18 @@
 import { siteUrl } from "./assets";
 import { readEventStream } from "./events";
+import { gradeObjective, totals } from "./exam-grade";
+import type {
+  Attempt,
+  ExamDetail,
+  ExamInfo,
+  ExamSummary,
+  ExamUpload,
+  Grading,
+  Quiz,
+  Section,
+  SectionMeta,
+  StaticExam,
+} from "./exam-types";
 import type {
   Account,
   Alignment,
@@ -59,6 +72,69 @@ export type DataAdapter = {
   ): Promise<void>;
   chats(courseId: string): Promise<ChatSummary[]>;
   conversation(courseId: string, chatId: string): Promise<Chat>;
+  // Exam prep (docs/architecture.md, Exam prep)
+  exams(courseId: string): Promise<ExamSummary[]>;
+  createExam(courseId: string, title: string): Promise<ExamInfo>;
+  exam(courseId: string, examId: string): Promise<ExamDetail>;
+  updateExam(
+    courseId: string,
+    examId: string,
+    patch: Partial<Pick<ExamInfo, "title" | "scope" | "options">>,
+  ): Promise<ExamInfo>;
+  uploadExamFiles(
+    courseId: string,
+    examId: string,
+    files: File[],
+  ): Promise<ExamUpload[]>;
+  uploadExamText(
+    courseId: string,
+    examId: string,
+    text: string,
+  ): Promise<ExamUpload>;
+  deleteExamUpload(
+    courseId: string,
+    examId: string,
+    name: string,
+  ): Promise<ExamUpload[]>;
+  handout(courseId: string, examId: string): Promise<Section[]>;
+  saveSection(
+    courseId: string,
+    examId: string,
+    section: number,
+    markdown: string,
+  ): Promise<SectionMeta>;
+  uploadExamAsset(
+    courseId: string,
+    examId: string,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<string>;
+  quiz(courseId: string, examId: string): Promise<Quiz | null>;
+  attempts(courseId: string, examId: string): Promise<Attempt[]>;
+  submitAttempt(
+    courseId: string,
+    examId: string,
+    quiz: Quiz,
+    body: Pick<Attempt, "answers" | "startedAt" | "durationSec">,
+  ): Promise<Attempt>;
+  gradeAnswer(
+    courseId: string,
+    examId: string,
+    attemptId: string,
+    body: {
+      question: string;
+      answer: string;
+      account: string;
+      model?: string;
+      effort?: string;
+    },
+  ): Promise<{ grading: Grading; attempt: Attempt }>;
+  createExamJob(
+    courseId: string,
+    examId: string,
+    parts: ("handout" | "quiz")[],
+    agent: { account: string; model?: string; effort?: string },
+  ): Promise<{ id: string }>;
 };
 
 const call = async <T>(path: string, init?: RequestInit): Promise<T> => {
@@ -77,6 +153,8 @@ const call = async <T>(path: string, init?: RequestInit): Promise<T> => {
 };
 const pathSegment = (value: string) => encodeURIComponent(value);
 const coursePath = (c: string) => `/api/courses/${pathSegment(c)}`;
+const examPath = (c: string, e: string) =>
+  `${coursePath(c)}/exams/${pathSegment(e)}`;
 const notePath = (c: string, d: string, i: number) =>
   `${coursePath(c)}/decks/${pathSegment(d)}/notes/${i}`;
 const readOnly = async (): Promise<never> => {
@@ -180,6 +258,111 @@ const local: DataAdapter = {
   },
   chats: (c) => call(`${coursePath(c)}/chats`),
   conversation: (c, id) => call(`${coursePath(c)}/chats/${pathSegment(id)}`),
+  exams: (c) => call(`${coursePath(c)}/exams`),
+  createExam: (c, title) =>
+    call(`${coursePath(c)}/exams`, {
+      method: "POST",
+      body: JSON.stringify({ title }),
+    }),
+  exam: (c, e) => call(examPath(c, e)),
+  updateExam: (c, e, patch) =>
+    call(examPath(c, e), { method: "PUT", body: JSON.stringify(patch) }),
+  uploadExamFiles: async (c, e, files) => {
+    const body = new FormData();
+    for (const file of files) body.append("files", file);
+    const { uploads } = await call<{ uploads: ExamUpload[] }>(
+      `${examPath(c, e)}/uploads`,
+      { method: "POST", body },
+    );
+    return uploads;
+  },
+  uploadExamText: (c, e, text) =>
+    call(`${examPath(c, e)}/uploads/text`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+  deleteExamUpload: async (c, e, name) =>
+    (
+      await call<{ uploads: ExamUpload[] }>(
+        `${examPath(c, e)}/uploads/${pathSegment(name)}`,
+        { method: "DELETE" },
+      )
+    ).uploads,
+  handout: async (c, e) => {
+    const { handout } = await call<ExamDetail>(examPath(c, e));
+    return Promise.all(
+      handout.map(async (meta) => {
+        const { markdown } = await call<{ markdown: string }>(
+          `${examPath(c, e)}/handout/${meta.section}`,
+        );
+        return { ...meta, markdown };
+      }),
+    );
+  },
+  saveSection: async (c, e, n, markdown) =>
+    (
+      await call<{ meta: SectionMeta }>(`${examPath(c, e)}/handout/${n}`, {
+        method: "PUT",
+        body: JSON.stringify({ markdown }),
+      })
+    ).meta,
+  uploadExamAsset: async (c, e, file, signal) => {
+    const body = new FormData();
+    body.append("file", file);
+    const { path } = await call<{ path: string }>(`${examPath(c, e)}/assets`, {
+      method: "POST",
+      body,
+      signal,
+    });
+    return path;
+  },
+  quiz: async (c, e) => {
+    const response = await fetch(`${examPath(c, e)}/quiz`);
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error("讀取題目失敗");
+    return response.json();
+  },
+  attempts: async (c, e) => {
+    const list = await call<{ id: string }[]>(`${examPath(c, e)}/attempts`);
+    return Promise.all(
+      list.map((item) =>
+        call<Attempt>(`${examPath(c, e)}/attempts/${pathSegment(item.id)}`),
+      ),
+    );
+  },
+  submitAttempt: (c, e, _quiz, body) =>
+    call(`${examPath(c, e)}/attempts`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  gradeAnswer: (c, e, a, body) =>
+    call(`${examPath(c, e)}/attempts/${pathSegment(a)}/grade`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  createExamJob: (c, e, parts, agent) =>
+    call(`${coursePath(c)}/jobs`, {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "exam",
+        options: { exam: e, parts, ...agent },
+      }),
+    }),
+};
+
+// Static mode: the exam file holds the handout and quiz; answers live in this browser only.
+const staticExam = (c: string, e: string) =>
+  call<StaticExam>(
+    siteUrl(`/data/${pathSegment(c)}/exams/${pathSegment(e)}.json`),
+  );
+const attemptsKey = (c: string, e: string) => `marginalia.exam.${c}.${e}`;
+const storedAttempts = (c: string, e: string): Attempt[] => {
+  try {
+    const value = JSON.parse(localStorage.getItem(attemptsKey(c, e)) ?? "[]");
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
 };
 
 // The static deck file holds every slide's note; fetch it once per deck, not once per slide.
@@ -239,6 +422,66 @@ const staticAdapter: DataAdapter = {
   accounts: async () => [],
   chats: async () => [],
   conversation: readOnly,
+  exams: (c) =>
+    call<ExamSummary[]>(siteUrl(`/data/${pathSegment(c)}/exams.json`)).catch(
+      () => [],
+    ),
+  exam: async (c, e) => {
+    const value = await staticExam(c, e);
+    return {
+      exam: value.exam,
+      uploads: [],
+      handout: value.handout.map((s) => ({
+        section: s.section,
+        title: s.title,
+        status: s.meta.status,
+        updatedAt: s.meta.updatedAt,
+      })),
+      quiz: value.quiz
+        ? { hash: value.quiz.hash, questionCount: value.quiz.questions.length }
+        : null,
+    };
+  },
+  handout: async (c, e) =>
+    (await staticExam(c, e)).handout.map((s) => ({
+      section: s.section,
+      title: s.title,
+      status: s.meta.status,
+      updatedAt: s.meta.updatedAt,
+      markdown: s.markdown,
+    })),
+  quiz: async (c, e) => (await staticExam(c, e)).quiz,
+  attempts: async (c, e) => storedAttempts(c, e),
+  submitAttempt: async (c, e, quiz, body) => {
+    const results = Object.fromEntries(
+      quiz.questions.map((q) => [q.id, gradeObjective(q, body.answers[q.id])]),
+    );
+    const attempt: Attempt = {
+      ...body,
+      id: crypto.randomUUID().replaceAll("-", ""),
+      quizHash: quiz.hash,
+      submittedAt: new Date().toISOString(),
+      results,
+      gradings: {},
+      ...totals(results),
+    };
+    try {
+      localStorage.setItem(
+        attemptsKey(c, e),
+        JSON.stringify([attempt, ...storedAttempts(c, e)].slice(0, 20)),
+      );
+    } catch {}
+    return attempt;
+  },
+  createExam: readOnly,
+  updateExam: readOnly,
+  uploadExamFiles: readOnly,
+  uploadExamText: readOnly,
+  deleteExamUpload: readOnly,
+  saveSection: readOnly,
+  uploadExamAsset: readOnly,
+  gradeAnswer: readOnly,
+  createExamJob: readOnly,
 };
 
 const mockCourse: Course = {
