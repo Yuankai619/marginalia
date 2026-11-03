@@ -126,7 +126,7 @@ Markdown extensions (frontend and backend contract):
 | Use | Syntax | Rendering |
 | --- | --- | --- |
 | Flowchart, architecture, state, sequence diagrams | ```` ```mermaid ```` block: `flowchart`, `sequenceDiagram`, `stateDiagram-v2`, `classDiagram`, `block-beta`; node text may be zh-TW | mermaid → SVG, follows light/dark theme; on a syntax error show the source plus the error instead of breaking the page; click to enlarge |
-| Images (drawings, screenshots, SVG diagrams) | `![caption](assets/<file>.svg)`, files in `notes/<deck>/assets/`, png/jpg/webp/svg | `<img>` (SVG always as img, never inline, so no scripts), caption shown below; click to enlarge |
+| Images (drawings, screenshots, SVG diagrams) | `![caption](assets/<file>.svg)`, files in `notes/<deck>/assets/` (flat, no subfolders), png/jpg/webp/svg; the editor uploads pasted or dropped images through `POST …/assets` | `<img>` (SVG always as img, never inline, so no scripts), caption shown below; click to enlarge. Any other `src` renders as its caption text |
 | Highlight | `==text==` | `<mark>` |
 | Bold | `**term**` (a term where it is first defined, the key words of a conclusion) | bold |
 | Callouts | GitHub alerts `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]` | blocks labelled 補充說明, 小技巧, 重點, 注意, 易混淆 |
@@ -188,6 +188,7 @@ Origin 比對仍須符合清單中的協定、主機與連接埠，或與請求�
 | GET | `/api/courses/{c}/decks/{d}` | | `{deck, slides:[{index,title,text,speakerNotes,image,thumb,ranges:[{video,start,end}],note:{status,updatedAt}|null}]}` |
 | GET | `/api/courses/{c}/decks/{d}/notes/{i}` | | `{markdown, meta, review|null}` |
 | PUT | `/api/courses/{c}/decks/{d}/notes/{i}` | `{markdown}` | `{meta}`; sets `status: edited` |
+| POST | `/api/courses/{c}/decks/{d}/assets` | multipart `file` (png/jpg/webp/svg, ≤ 10 MB; content must match the extension; SVG is parsed and must be a plain drawing: allowlisted elements, no event handlers, no references outside the file, no DOCTYPE other than the W3C SVG ones, no entities or processing instructions, CSS checked after unescaping) | `{path:"assets/<name>-<sha256[:10]>.<ext>"}`, saved to `notes/<d>/assets/`; 422 for a rejected file |
 | GET | `/api/courses/{c}/videos/{v}/transcript` | `?from=&to=` seconds | `{segments:[{start,end,text}], partial:bool}` |
 | GET | `/api/courses/{c}/alignment` | | alignment.json |
 | PUT | `/api/courses/{c}/alignment/segments` | `{video,start,end,deck,slide}` | alignment.json (adds a manual segment) |
@@ -235,7 +236,12 @@ dist/data/<c>/course.json                 info + decks + videos (no local paths)
 dist/data/<c>/decks/<d>.json              same shape as GET /api/courses/{c}/decks/{d}, plus notes[i].markdown
 dist/data/<c>/transcripts/<v>.json
 dist/files/<c>/generated/decks/<d>/slides/NNN.webp (+ thumbs)
+dist/files/<c>/notes/<d>/assets/*         note images, same URLs as local mode
 ```
+
+Hosting: serve `.svg` files with `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:`
+(what `/files` sends locally), so an image opened on its own cannot load anything. `index.html` carries its own
+CSP meta (no remote images, scripts or fetches).
 
 ## LLM usage rule
 

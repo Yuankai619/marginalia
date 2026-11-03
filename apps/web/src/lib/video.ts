@@ -49,4 +49,17 @@ export function videoSource(
 }
 
 export const formatTime = (seconds: number) =>
-  `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+  seconds >= 3600
+    ? timestampLabel(seconds)
+    : `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+
+/** `[mm:ss](video:<id>?t=<s>)`, `h:mm:ss` past an hour (docs/architecture.md, Note format). */
+export const timestampLabel = (time: number) => {
+  const seconds = Math.floor(time);
+  const h = Math.floor(seconds / 3600);
+  const mm = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0");
+  const ss = String(seconds % 60).padStart(2, "0");
+  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+};
+export const timestampLink = ({ video, time }: VideoTime) =>
+  `[${timestampLabel(time)}](video:${encodeURIComponent(video)}?t=${Math.floor(time)})`;

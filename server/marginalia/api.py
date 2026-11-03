@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import ingest
+from . import ingest, note_assets
 from .agents import chat
 from .course_access import check_course, confined
 from .jobs import JobRunner, runner
@@ -35,6 +35,9 @@ from .store import (
     write_json,
     write_text,
 )
+
+SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+_ASSET_UPLOAD = re.compile(r"/api/courses/[^/]+/decks/[^/]+/assets")
 
 
 def _error(status: int, detail: str) -> HTTPException:
@@ -233,6 +236,18 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
                 return JSONResponse({"detail": "不允許此請求來源"}, status_code=403)
         return await call_next(request)
 
+    @app.middleware("http")
+    async def limit_asset_upload(request: Request, call_next):
+        # The multipart parser spools a whole file part before the route sees it, so cap it by header.
+        if request.method == "POST" and _ASSET_UPLOAD.fullmatch(request.url.path):
+            try:
+                size = int(request.headers.get("content-length", ""))
+            except ValueError:
+                return JSONResponse({"detail": "需要 Content-Length"}, status_code=411)
+            if size > note_assets.MAX_BYTES + 64 * 1024:
+                return JSONResponse({"detail": "圖片不能超過 10 MB"}, status_code=413)
+        return await call_next(request)
+
     app.state.jobs = job_runner
 
     @app.get("/api/health")
@@ -348,6 +363,24 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
             "manifest": await asyncio.to_thread(ingest.scan, course),
         }
 
+    @app.post("/api/courses/{course_id}/decks/{deck}/assets")
+    async def upload_note_asset(
+        course_id: str, deck: str, file: Annotated[UploadFile, File()]
+    ):
+        course = _course(course_id)  # save_asset checks the deck itself
+        data = await file.read(note_assets.MAX_BYTES + 1)
+        try:
+            path = await asyncio.to_thread(
+                note_assets.save_asset, course, deck, file.filename or "image", data
+            )
+        except LookupError as exc:
+            raise _error(404, "找不到簡報") from exc
+        except note_assets.AssetError as exc:
+            raise _error(422, str(exc)) from exc
+        except ValueError as exc:  # path checks; their messages carry absolute paths
+            raise _error(422, "圖片路徑不正確") from exc
+        return {"path": path}
+
     @app.post("/api/courses/{course_id}/scan")
     async def scan(course_id: str):
         return await asyncio.to_thread(ingest.scan, _course(course_id))
@@ -459,6 +492,9 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
         course = _course(course_id)
         file = _safe_file(course, path)
         headers = {"X-Content-Type-Options": "nosniff"}
+        if file.suffix.lower() == ".svg":
+            # Opened on its own, an SVG is a document: let it load nothing from anywhere.
+            headers["Content-Security-Policy"] = SVG_CSP
         return (
             _range_response(file, request)
             if file.suffix.lower() in {".mp4", ".mkv", ".mov", ".webm", ".m4v"}

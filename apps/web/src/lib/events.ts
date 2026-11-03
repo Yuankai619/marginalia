@@ -4,7 +4,7 @@ export async function readEventStream(
   response: Response,
   onEvent: (event: ChatEvent) => void,
 ) {
-  if (!response.body) throw new Error("Agent 未傳回串流");
+  if (!response.body) throw new Error("助教沒有傳回內容");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -34,7 +34,7 @@ export async function readEventStream(
       if (done) break;
     }
     if (buffer.trim()) dispatch(buffer);
-    if (!completed) throw new Error("Agent 連線中斷，回覆可能不完整");
+    if (!completed) throw new Error("和助教的連線中斷了，回覆可能不完整");
   } finally {
     await reader.cancel();
     reader.releaseLock();

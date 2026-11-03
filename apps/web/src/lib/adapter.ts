@@ -5,6 +5,7 @@ import type {
   Chat,
   ChatEvent,
   ChatRequest,
+  ChatSummary,
   Course,
   CourseDetail,
   DeckDetail,
@@ -39,6 +40,13 @@ export type DataAdapter = {
     segment: Alignment["segments"][number],
   ): Promise<Alignment>;
   upload(courseId: string, files: File[]): Promise<unknown>;
+  /** Saves an image into notes/<deck>/assets/ and returns the markdown path (`assets/<name>`). */
+  uploadAsset(
+    courseId: string,
+    deckId: string,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<string>;
   scan(courseId: string): Promise<unknown>;
   createJob(courseId: string, decks: string[]): Promise<{ id: string }>;
   job(id: string): Promise<Job>;
@@ -48,7 +56,7 @@ export type DataAdapter = {
     onEvent: (event: ChatEvent) => void,
     signal: AbortSignal,
   ): Promise<void>;
-  chats(courseId: string): Promise<Omit<Chat, "messages">[]>;
+  chats(courseId: string): Promise<ChatSummary[]>;
   conversation(courseId: string, chatId: string): Promise<Chat>;
 };
 
@@ -74,7 +82,7 @@ const readOnly = async (): Promise<never> => {
   throw new Error("靜態閱讀模式無法修改資料");
 };
 export const emptyNote = (): Note => ({
-  markdown: "尚無筆記",
+  markdown: "",
   meta: { status: "skipped" },
   review: null,
 });
@@ -139,6 +147,15 @@ const local: DataAdapter = {
     if (!response.ok) throw new Error("匯入檔案失敗，請確認檔案格式並重試");
     return response.json();
   },
+  uploadAsset: async (c, d, file, signal) => {
+    const body = new FormData();
+    body.append("file", file);
+    const { path } = await call<{ path: string }>(
+      `${coursePath(c)}/decks/${pathSegment(d)}/assets`,
+      { method: "POST", body, signal },
+    );
+    return path;
+  },
   scan: (c) => call(`${coursePath(c)}/scan`, { method: "POST" }),
   createJob: (c, decks) =>
     call(`${coursePath(c)}/jobs`, {
@@ -156,12 +173,24 @@ const local: DataAdapter = {
     });
     if (!response.ok)
       throw new Error(
-        (await response.json().catch(() => null))?.detail || "無法連接 Agent",
+        (await response.json().catch(() => null))?.detail || "無法連上助教",
       );
     await readEventStream(response, onEvent);
   },
   chats: (c) => call(`${coursePath(c)}/chats`),
   conversation: (c, id) => call(`${coursePath(c)}/chats/${pathSegment(id)}`),
+};
+
+// The static deck file holds every slide's note; fetch it once per deck, not once per slide.
+const staticDecks = new Map<string, Promise<StaticDeck>>();
+const staticDeck = (url: string) => {
+  let deck = staticDecks.get(url);
+  if (!deck) {
+    deck = call<StaticDeck>(url);
+    staticDecks.set(url, deck);
+    deck.catch(() => staticDecks.delete(url));
+  }
+  return deck;
 };
 
 const staticAdapter: DataAdapter = {
@@ -170,9 +199,10 @@ const staticAdapter: DataAdapter = {
   mode: "static",
   courses: () => call("/data/courses.json"),
   course: (c) => call(`/data/${pathSegment(c)}/course.json`),
-  deck: (c, d) => call(`/data/${pathSegment(c)}/decks/${pathSegment(d)}.json`),
+  deck: (c, d) =>
+    staticDeck(`/data/${pathSegment(c)}/decks/${pathSegment(d)}.json`),
   note: async (c, d, i) => {
-    const deck = await call<StaticDeck>(
+    const deck = await staticDeck(
       `/data/${pathSegment(c)}/decks/${pathSegment(d)}.json`,
     );
     const note = deck.notes?.[i];
@@ -193,6 +223,7 @@ const staticAdapter: DataAdapter = {
   saveNote: readOnly,
   updateSegment: readOnly,
   upload: readOnly,
+  uploadAsset: readOnly,
   scan: readOnly,
   createJob: readOnly,
   job: readOnly,
@@ -244,6 +275,7 @@ const mock: DataAdapter = {
   mode: "mock",
   createCourse: async () => ({}),
   upload: async () => ({ saved: [], manifest: { decks: [], videos: [] } }),
+  uploadAsset: async (_c, _d, file) => `assets/${file.name}`,
   scan: async () => ({ decks: [], videos: [] }),
   chats: async () => [],
   chat: async (_request, onEvent) => {
