@@ -34,6 +34,7 @@ server/                   Python 3.12, uv
     llm/codex.py          one-shot calls through `codex exec` (optional second engine)
     llm/accounts.py       detect logged-in Claude / Codex accounts
     notes/                note writer, reviewer agents, prompts
+    exam/                 exam prep: handout, quiz, grading (see Exam prep)
     agents/               chat: Q&A, interview, on-demand review (streaming)
     jobs.py               background job runner + progress events
     api.py                FastAPI app
@@ -229,7 +230,7 @@ Origin 比對仍須符合清單中的協定、主機與連接埠，或與請求�
 `job` = `{id, course, kind, state:"queued"|"running"|"done"|"failed"|"cancelled", progress:0..1, message,
 steps:[{name,state,progress,message}], createdAt, startedAt?, finishedAt?, error?}`.
 Job kinds: `pipeline` (everything for the given decks), `scan`, `render`, `align`, `transcribe`, `generate`,
-`review`.
+`review`, `exam` (see Exam prep).
 
 Chat request:
 
@@ -296,6 +297,244 @@ even when a local backend is running.
 Hosting: serve `.svg` files with `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:`
 (what `/files` sends locally), so an image opened on its own cannot load anything. `index.html` carries its own
 CSP meta (no remote images, scripts or fetches).
+
+## Exam prep
+
+A course can hold several exams (midterm, final, …). Each exam has a scope (which decks and videos it covers),
+optional past papers the user uploads, a **handout** (考前衝刺講義: one coherent, structured text that someone who
+never studied can read in under three hours) and a **quiz** (模擬考: past-paper questions plus new ones, with
+answers). Answering, checking and agent grading happen in the browser and the API; the static build keeps the
+handout and quiz but no uploads and no agent.
+
+### On disk
+
+```
+courses/<c>/exams/<exam>/
+  exam.json                 settings, written by the API
+  uploads/<name>            past papers / practice questions exactly as uploaded (png, jpg, webp, txt, md)
+  handout/NNN.md            handout sections in reading order, note-style frontmatter (below)
+  handout/assets/<name>     images pasted into the handout editor (same rules as notes/<deck>/assets)
+  quiz.json                 questions + answers (below)
+  attempts/<attempt>.json   one submitted answer sheet with its grading history
+  work/                     the generator's rebuildable scratch (parsed past papers, plans); never exported
+```
+
+- `<exam>` is a `store.validate_id` slug (`midterm`, `final-2026`); `<attempt>` is 32 lowercase hex.
+  Everything is resolved under `courses/<c>/exams/` with the same confinement as `notes/` (`Course.path`).
+- `exam.json`:
+
+  ```json
+  { "id": "midterm", "title": "期中考", "createdAt": "…", "updatedAt": "…",
+    "scope": { "decks": ["l2-…", "l3-…"], "videos": ["os20260923"] },
+    "options": { "questionCount": 20, "types": ["choice", "fill", "short", "essay", "calc"], "minutes": 90 },
+    "hidden": false }
+  ```
+
+  `scope.decks` empty means every visible deck. `scope.videos` empty means every video aligned to a deck in scope
+  (videos are only an extra filter; the transcript reaches the generator through the decks' slide ranges).
+  `options` are hints for the generator; all keys optional. `hidden: true` keeps the exam out of static export.
+- Upload names are `slugify(stem)[:60] + ext`, de-duplicated with `-2`, `-3` (never overwritten). Pasted text is
+  saved as `pasted-<sha256[:10]>.md`. An exam keeps at most 40 uploads.
+- Handout section frontmatter (same parser as notes, `notes/notefile.py`):
+
+  ```yaml
+  section: 3
+  title: 行程排程
+  status: generated          # generated | reviewed | edited ; missing = edited
+  sources: ["l2-processes#7", "l3-scheduling#12"]   # deck#slide the section draws on
+  updatedAt: 2026-11-04T10:00:00+08:00
+  ```
+
+  Body: the note markdown dialect (callouts, `==highlight==`, mermaid, KaTeX, tables, `<details>`), plus two image
+  sources: `![說明](slide:<deck>/<index>)` shows that slide's rendered image (a deck in the course; in static mode
+  only visible decks resolve, others render as caption text) and `![說明](assets/<name>)` resolves to
+  `handout/assets/`. Video timestamp links `[mm:ss](video:<id>?t=<s>)` are allowed exactly as in notes.
+  The user's edits are protected like notes: generation never overwrites an `edited` section; if any section is
+  `edited`, handout generation keeps the whole handout (result `kept`) unless `force`. A regenerated handout
+  replaces every section file atomically per file and removes surplus non-edited `NNN.md` beyond the new count.
+- `quiz.json`:
+
+  ```json
+  { "version": 1, "generatedAt": "…", "hash": "<sha256[:16] of questions JSON>",
+    "questions": [
+      { "id": "q1", "type": "choice", "origin": "past", "pastRef": "midterm-2024-p1.png",
+        "prompt": "下列何者會讓行程從 running 進入 waiting？", "multiple": false,
+        "options": [{ "id": "A", "text": "時間片用完" }, { "id": "B", "text": "等待 I/O 完成" }],
+        "answer": ["B"], "points": 2,
+        "solution": "markdown 詳解", "sources": [{ "deck": "l2-processes", "slide": 14 }], "topic": "行程狀態" },
+      { "id": "q2", "type": "fill", "prompt": "CPU 排程中，{{1}} 演算法可能造成 {{2}}。",
+        "blanks": [["SJF", "shortest job first"], ["starvation", "飢餓"]], "points": 4, "solution": "…" },
+      { "id": "q3", "type": "short", "prompt": "…", "points": 6, "solution": "參考答案 markdown",
+        "rubric": [{ "point": "說明 context switch 要保存 PCB", "points": 3 }, { "point": "…", "points": 3 }] }
+    ] }
+  ```
+
+  - `id` `[A-Za-z0-9_-]{1,40}`, unique. `type`: `choice` | `fill` | `short` (簡答) | `essay` (問答) | `calc` (計算).
+    `origin`: `past` (from an upload; `pastRef` is the upload name) | `new`. When the exam has uploads, the quiz
+    must contain every past-paper question the parser found, then new questions.
+  - `choice`: `options` (2–8, ids `A`…), `answer` the correct option ids, `multiple` whether more than one may be
+    picked. `fill`: blanks marked `{{1}}`, `{{2}}`… in `prompt`, `blanks[n-1]` lists accepted answers.
+    `short`/`essay`/`calc`: `solution` is the reference answer, `rubric` the scoring points (sum = `points`).
+  - `prompt`, option `text`, `solution` and rubric `point` are note-dialect markdown (`slide:` images allowed).
+  - `points` is a positive integer; `sources` optional.
+- Attempt (`attempts/<id>.json`):
+
+  ```json
+  { "id": "…", "quizHash": "…", "startedAt": "…", "submittedAt": "…", "durationSec": 3120,
+    "answers": { "q1": ["B"], "q2": ["SJF", "飢餓"], "q3": "我的答案" },
+    "results": { "q1": { "status": "correct", "score": 2, "maxScore": 2 },
+                 "q3": { "status": "pending", "score": null, "maxScore": 6 } },
+    "score": 6, "maxScore": 12,
+    "gradings": { "q3": [ { "id": "…", "answer": "我的答案", "score": 4, "maxScore": 6,
+                            "verdict": "partial", "summary": "…", "issues": [{ "quote": "…", "problem": "…", "fix": "…" }],
+                            "missing": ["…"], "account": "claude", "model": "sonnet", "createdAt": "…" } ] } }
+  ```
+
+  Objective grading (`choice`, `fill`) is deterministic: `choice` needs exactly the right set; `fill` scores each
+  blank `points / blanks` (rounded to 0.5) after NFKC, trim, collapsing whitespace and case folding, comparing to any
+  accepted answer. Status `correct` | `partial` | `incorrect` | `blank` (empty answer, 0 points) | `pending`
+  (subjective, not yet graded). The latest grading of a subjective question sets its `results` entry; `score`
+  sums known scores. Every grading is kept, in order; a grading carries the answer text it graded, so the user can
+  rewrite and grade again without losing earlier versions. The same objective rules are implemented in
+  `server/marginalia/exam/grade.py` and `apps/web/src/lib/exam-grade.ts` and share test cases.
+
+### HTTP API (local mode)
+
+Same conventions as the main API (JSON, `{"detail": "<繁中>"}` errors, Origin check on writes). `{e}` is the exam id.
+
+| Method | Path | Body / query | Returns |
+| --- | --- | --- | --- |
+| GET | `/api/courses/{c}/exams` | | `[examSummary]` = `{id,title,updatedAt,scope,uploadCount,sectionCount,questionCount}` |
+| POST | `/api/courses/{c}/exams` | `{title, id?, scope?, options?}` | `exam`; 409 if the id exists |
+| GET | `/api/courses/{c}/exams/{e}` | | `{exam, uploads:[upload], handout:[{section,title,status,updatedAt,sources}], quiz:{questionCount,hash,generatedAt}|null}` |
+| PUT | `/api/courses/{c}/exams/{e}` | partial `{title, scope, options, hidden}` | `exam`; unknown deck/video ids → 422 |
+| POST | `/api/courses/{c}/exams/{e}/uploads` | multipart `files[]` | `{uploads:[upload]}`; 413/422 per rule below |
+| POST | `/api/courses/{c}/exams/{e}/uploads/text` | `{text}` (1–200,000 chars) | `upload` |
+| DELETE | `/api/courses/{c}/exams/{e}/uploads/{name}` | | `{uploads}` |
+| GET | `/api/courses/{c}/exams/{e}/handout/{n}` | | `{markdown, meta}` |
+| PUT | `/api/courses/{c}/exams/{e}/handout/{n}` | `{markdown}` | `{meta}`; sets `status: edited` (also creates section n = count+1) |
+| POST | `/api/courses/{c}/exams/{e}/assets` | multipart `file` | `{path:"assets/<name>"}`; note-asset rules |
+| GET | `/api/courses/{c}/exams/{e}/quiz` | | `quiz.json` (answers included: hiding them is the UI's job, as in static mode) |
+| GET | `/api/courses/{c}/exams/{e}/attempts` | | `[{id,submittedAt,score,maxScore}]`, newest first |
+| POST | `/api/courses/{c}/exams/{e}/attempts` | `{answers, startedAt?, durationSec?}` | `attempt`, objective questions graded |
+| GET | `/api/courses/{c}/exams/{e}/attempts/{a}` | | `attempt` |
+| POST | `/api/courses/{c}/exams/{e}/attempts/{a}/grade` | `{question, answer?, account, model?, effort?}` | `{grading, attempt}`; blocks until the agent replies (≤ 5 min) |
+
+`upload` = `{name, kind:"image"|"text", size, url}` (`url` is `/files/<c>/exams/<e>/uploads/<name>`).
+`answer` in a grade request defaults to the attempt's answer for that question; only `short`, `essay`, `calc`
+can be agent-graded (422 otherwise). `account`/`model`/`effort` are validated against `GET /api/agents/accounts`
+like chat. Gradings of one attempt are serialized.
+
+Generation is a job: `POST /api/courses/{c}/jobs` with
+`{kind:"exam", options:{exam, parts?:["handout","quiz"], force?, account?, model?, effort?}}`. Progress, cancel and
+SSE are the normal job ones. The job result (in `job.message`) says how many sections/questions were written.
+
+### Generation pipeline interface (`server/marginalia/exam/`)
+
+```
+exam/
+  store.py      Exam: paths, exam.json, uploads, sections, quiz, attempts, locks      (API card)
+  context.py    ExamContext: everything in scope, loaded from disk; llm() wrapper    (API card)
+  grade.py      objective grading, agent grading prompt + parsing                    (API card)
+  run.py        generate_exam(): the job entry; validates and writes outputs        (API card)
+  past.py       parse_uploads()     past papers -> PastQuestion list                (generation card)
+  handout.py    write_handout()     scope -> sections                               (generation card)
+  quiz.py       write_quiz()        scope + past -> questions                       (generation card)
+  prompts/      prompt text, style rules                                            (generation card)
+```
+
+```python
+@dataclass
+class SlideDoc:            # one slide in scope
+    deck: str; index: int; title: str; text: str; speaker_notes: str
+    note: str              # note body (frontmatter stripped), "" if none
+    image: Path | None     # rendered slide webp, for llm(images=...)
+    lines: list[dict]      # transcript lines on screen for this slide: {video, start, text}
+
+@dataclass
+class DeckDoc:
+    id: str; title: str; slides: list[SlideDoc]
+
+@dataclass
+class Upload:
+    name: str; kind: Literal["image", "text"]; path: Path
+    text: str              # file content for text uploads, "" for images
+
+@dataclass
+class ExamContext:
+    course: Course; exam: dict          # exam.json
+    decks: list[DeckDoc]                # scope order
+    uploads: list[Upload]
+    work: Path                          # exams/<e>/work/, free for the generator's cache files
+    async def llm(self, prompt: str, *, system: str = "", images: list[Path] = (),
+                  model: str | None = None) -> str: ...
+        # one call on the job's account (claude or codex), no tools, ANTHROPIC_API_KEY stripped; text reply
+
+@dataclass
+class PastQuestion:
+    upload: str            # Upload.name it came from
+    number: str            # as printed ("3", "二(1)"), "" if none
+    type: str              # same types as quiz questions
+    prompt: str            # markdown, transcribed faithfully
+    options: list[dict]    # choice only [{id, text}]
+    answer_hint: str       # answer printed on the paper, "" if none
+
+@dataclass
+class Section:
+    title: str; markdown: str
+    sources: list[tuple[str, int]]      # (deck, slide)
+
+Progress = Callable[[float, str], None]   # fraction 0..1 of this step, zh-TW message
+
+async def parse_uploads(ctx: ExamContext, progress: Progress) -> list[PastQuestion]
+async def write_handout(ctx: ExamContext, progress: Progress) -> list[Section]
+async def write_quiz(ctx: ExamContext, past: list[PastQuestion], progress: Progress) -> list[dict]
+    # returns quiz questions in the quiz.json shape; may leave `id` empty (run.py numbers them q1, q2…)
+```
+
+`run.generate_exam(course, exam_id, *, parts, force, account, model, effort, progress)` builds the context, calls
+the three functions, then validates: sections need a title and a non-empty body; questions are checked against
+the quiz schema above (bad ones are dropped with a count in the job message; zero valid questions fails the job);
+every `PastQuestion` must map to a `past` question (missing ones are added as `short` questions with the
+transcribed prompt and no rubric, so past papers are never lost). Before writing, `run.py` strips
+`slide:` references to slides outside the course, and asset references that do not exist. The generator never
+writes `handout/`, `quiz.json` or `attempts/` itself, only `work/`. Errors raised by the three functions fail the
+job with the message shown in zh-TW. A first, minimal implementation of all three ships with the API card
+(one model call per part, structurally valid output); the generation card replaces their internals without changing
+the signatures.
+
+### Static export
+
+```
+dist/data/<c>/exams.json                    [{id,title,updatedAt,sectionCount,questionCount}]
+dist/data/<c>/exams/<e>.json                {exam:{id,title,scope:{decks}}, handout:[{section,title,markdown,meta:{status,updatedAt?}}],
+                                             quiz:{hash, questions}|null}
+dist/files/<c>/exams/<e>/handout/assets/*   referenced handout images, revalidated like note assets
+```
+
+- Exported: exams not `hidden`, sections of any status (missing = edited), questions with `pastRef` removed.
+  `slide:` images resolve to the already exported slide images; references to hidden decks render as captions.
+- Not exported: `uploads/`, `work/`, `attempts/`, exam `options`, video scope.
+- In the static reader the quiz is answered in the browser: answers and results live in `localStorage`
+  (`marginalia.exam.<c>.<e>`), objective questions are graded by `exam-grade.ts`, subjective ones show the
+  reference answer and rubric for self-check. No agent grading button. In both modes answers and solutions are
+  hidden until 對答案 (the data is present in the JSON; this is a study aid, not a proctored exam).
+
+### Security
+
+- Uploads: images png/jpg/webp ≤ 10 MB with magic-byte check (`note_assets` rules; no SVG), text txt/md ≤ 1 MB
+  that must decode as UTF-8; the request is capped by `Content-Length` before parsing (40 MB per request);
+  file names are slugified, never taken as paths; names in URLs are validated (`[\w][\w.-]*`, no `..`).
+- Paths: exam/attempt ids are validated; every path goes through `Course.path` confinement; writes use
+  `atomic_output`/`exclusive_output` (pinned parent fds, no symlink following); input symlinks under `exams/`
+  are refused by `check_course`.
+- Prompt injection: past-paper images/text, slides, notes, transcripts and student answers are untrusted
+  material. Every generation and grading call runs with **no tools** (Claude `tools=[]`, Codex locked down as in
+  `llm/codex.py`), so an injected instruction can only affect the text it returns. System prompts say material is
+  data, not instructions; student answers travel inside `<student_answer>` tags with the closing tag escaped.
+  Model output is parsed as JSON and validated: scores are clamped to `[0, maxScore]`, unknown fields dropped,
+  markdown rendered by the same sanitizer as notes (no raw HTML beyond `<details>`).
+- Grading and generation are local-mode only and use only subscription logins (LLM usage rule).
 
 ## LLM usage rule
 
