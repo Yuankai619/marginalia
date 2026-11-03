@@ -1,6 +1,6 @@
 """Write one markdown note per slide with the local Claude login.
 
-Each slide is one model call that sees the slide image, its text and speaker notes, the neighbouring titles, the
+Each slide's writer sees the slide image, its text and speaker notes, the neighbouring titles, the
 deck outline and the teacher's transcript for the time the slide was on screen. Notes are written atomically as
 they finish, so an interrupted run picks up where it stopped. Notes the user edited are never overwritten unless
 `force` is set.
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from .. import config
@@ -38,12 +39,11 @@ TASK = """## 任務
 
 LINKS_RULE = "時間點連結寫成 [mm:ss](video:<影片 id>?t=<秒數>)，秒數取逐字稿裡講到那件事的那一行開頭的 t 值。"
 NO_LINKS_RULE = "這頁沒有逐字稿，所以不要附任何時間點連結；正文只依投影片與講者備註寫，寫不出來的不要猜。"
-NOT_SHOWN = "對齊結果裡這頁沒有出現在影片上，老師沒有講解這頁。"
 NOT_TAUGHT = "老師在課堂上沒有講解這頁。"
 UNTAUGHT_NOTICE = "> [!IMPORTANT]\n> 本頁課堂未講解，以下根據投影片整理。"
 UNTAUGHT_RULE = f"""本頁課堂未講解，只依投影片圖片、文字與講者備註整理；前後頁標題和大綱只供脈絡參考。
 不要捏造「老師說」、課堂例子或口頭補充；不要要求逐字稿佐證。
-只有真的空白頁或純標題頁可以略過，其餘頁都要保留筆記。
+只有真的空白頁或純標題頁（含章節分隔頁）可以略過，其餘頁都要保留筆記。
 第一個提示框必須是：\n{UNTAUGHT_NOTICE}\n\n接著寫這頁的結論與筆記。{NO_LINKS_RULE}"""
 SKIP = re.compile(r"\A\s*SKIP\s*[:：]\s*(.*)", re.DOTALL)
 FENCE = re.compile(r"\A(`{3,})(?:markdown|md)?[ \t]*\n(.*?)\n\1[ \t]*\Z", re.DOTALL)
@@ -69,7 +69,7 @@ def parse_output(text: str) -> tuple[str, str]:
 
 def prompt(m: Material) -> str:
     skip = (
-        "只有真的空白頁或純標題頁才可以只輸出一行 `SKIP: <一句說明>`；其餘頁都要寫筆記。"
+        "只有真的空白頁或純標題頁（含章節分隔頁）才可以只輸出一行 `SKIP: <一句說明>`；其餘頁都要寫筆記。"
         if m.untaught else
         "如果逐字稿顯示老師沒有講這頁（只是翻過去，或這段時間在講別的東西），只輸出一行：`SKIP: <一句說明>`。"
     )
@@ -100,6 +100,21 @@ def meta(m: Material, status: str, partial: str | None = None) -> dict:
     return out
 
 
+async def draft(m: Material) -> tuple[str, str]:
+    call = claude.Call(prompt=prompt(m), system=SYSTEM, images=m.images, model=config.WRITER_MODEL)
+    status, body = parse_output(await claude.complete(call))
+    if not body:
+        raise RuntimeError(f"第 {m.index} 頁模型沒有回傳內容")
+    return status, body
+
+
+async def slide_only_draft(m: Material) -> tuple[Material, str, str]:
+    """Retry a transcript-based SKIP using only slides; keep the original fingerprint for resume."""
+    m = replace(m, ranges=[], lines=[], untaught=True)
+    status, body = await draft(m)
+    return m, status, body
+
+
 async def write_note(course: Course, m: Material, force: bool = False) -> str:
     """Write one slide's note and return its status, or "kept" when the note changed meanwhile and was left alone."""
     path = course.note_path(m.deck["id"], m.index)
@@ -107,10 +122,9 @@ async def write_note(course: Course, m: Material, force: bool = False) -> str:
     current = notefile.read(path)
     if current is not None and not force and notefile.protected(current[0]):
         return "kept"
-    call = claude.Call(prompt=prompt(m), system=SYSTEM, images=m.images, model=config.WRITER_MODEL)
-    status, body = parse_output(await claude.complete(call))
-    if not body:
-        raise RuntimeError(f"第 {m.index} 頁模型沒有回傳內容")
+    status, body = await draft(m)
+    if status == "skipped" and not m.untaught:
+        m, status, body = await slide_only_draft(m)
     findings = []
     if m.untaught:
         body = untaught_body(body, skipped=status == "skipped")
@@ -139,10 +153,8 @@ def _wanted(g: Gatherer, slides: list[int] | None, force: bool):
             return False
         if slides is not None:
             return True
-        if front.get("status") == "skipped" and not front.get("inputs"):
-            note = notefile.read(g.course.note_path(g.deck["id"], i))
-            if note and note[1].strip() == NOT_SHOWN:
-                return True
+        if front.get("status") == "skipped" and not front.get("untaught"):
+            return True  # old skips have not yet been checked with slide-only material
         return bool(front.get("partial") or front.get("untaught")) and front.get("inputs") != g.get(i).inputs
 
     return keep

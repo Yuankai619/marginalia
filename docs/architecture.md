@@ -89,7 +89,7 @@ sources:
   - os20260916@846-1062   # video@start-end seconds the slide was on screen
 partial: true            # optional: written while the transcript or alignment was still pending
 inputs: 3f9a1c0b2d4e       # with partial: fingerprint of the ranges and transcript lines this slide used
-untaught: true           # optional: aligned deck, but this slide has no video ranges; also stores inputs
+untaught: true           # optional: unshown or skimmed slide, written from slides only; also stores inputs
 updatedAt: 2026-11-03T10:00:00+08:00
 ---
 
@@ -121,12 +121,19 @@ flowchart TD
   links/definitions, autolinks and HTML anchors. A separate conservative check also detects escaped/entity-encoded
   `video:` schemes; any residue keeps the note `generated` with a blocking review finding. Such unprotected
   untaught notes are omitted from static export until fixed; edited notes remain authored content.
-- `status: skipped` + one line remains available for blank/title-only untaught slides, or when a transcript
-  shows that the teacher merely flipped past a slide or discussed something else.
-- Resume refreshes unprotected `untaught` notes only when `inputs` changes. Once a slide gains video ranges,
-  it is rewritten as a regular note (timestamps when transcript lines are available), removing `untaught`.
-  Existing skipped notes with the old fixed “not shown” reason are migrated on resume; other model skips
-  stay skipped. Edited/hand-written notes remain protected.
+- When a writer or reviser returns `SKIP` while using recordings (the teacher merely flipped past a slide or
+  discussed something else), retry once with the slide image/text, notes and outline only. This second writer
+  may keep `status: skipped` only for blank, title-only or chapter-divider slides; substantive slides get the
+  same untaught notes and disclosure described above. Model classification uses the image as well as text;
+  empty extracted text alone does not identify a blank slide.
+- A fallback note has `sources: []`, `untaught: true`, and the original material's `inputs` fingerprint, including
+  its actual ranges/transcript, even though they are excluded from the fallback prompt. Partial material keeps
+  `partial: true`. Review retains that fingerprint rather than consuming later recording changes.
+- Resume refreshes unprotected `untaught` notes only when `inputs` changes. New video ranges or changed
+  transcript lines retry the regular writer, restoring timestamps when it explains the slide; a further SKIP
+  falls back to slides again. Old skipped notes without `untaught` are migrated once, even when they already
+  have a partial fingerprint. New blank/title/divider skips keep `untaught` and `inputs`, so unchanged resume
+  costs no model calls. Edited/hand-written notes remain protected.
 - A course without recordings (or with audio only), or a deck that no aligned video shows, gets final slide-only
   notes (no `partial`). A partial note is regenerated only when its `inputs` fingerprint changes. It is computed
   from content (this slide's ranges and transcript lines, whether they are complete, which videos are still pending),
