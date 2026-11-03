@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 
 from .material import PAD, Material, clock
+from .video_links import has_video_links
 
 BANNED = [
     "總之", "總而言之", "綜上所述", "值得注意的是", "值得一提的是", "讓我們", "我們來看看", "扮演著", "扮演重要",
@@ -64,14 +65,13 @@ def normalize_links(body: str) -> str:
 
 
 def check_links(body: str, m: Material) -> list[dict]:
+    if m.untaught:
+        return [_finding("high", "", "課堂未講解頁不能有影片時間點連結。", "移除連結，只依投影片整理。")] if has_video_links(body) else []
     out = []
     videos = set(m.videos)
     for lk in LINK.finditer(body):
         label, video, t = lk.groups()
         quote = _context(body, lk.start(), lk.end())
-        if m.untaught:
-            out.append(_finding("high", quote, "課堂未講解頁不能有影片時間點連結。", "移除連結，只依投影片整理。"))
-            continue
         if not SECONDS.fullmatch(t):
             out.append(_finding("high", quote, f"時間點 t={t} 不是秒數。", "改成逐字稿裡那一句的秒數。"))
             continue

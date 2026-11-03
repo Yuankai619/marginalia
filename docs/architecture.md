@@ -117,6 +117,10 @@ flowchart TD
   「本頁課堂未講解，以下根據投影片整理。」 They have no video timestamp links or invented classroom claims.
   Review checks slide consistency and coverage rather than requiring transcript evidence. The reader uses the
   existing callout renderer; final untaught notes are exported normally, with the disclosure in their body.
+  Before generated/revised writes, video citations are stripped from inline links (including titles), reference
+  links/definitions, autolinks and HTML anchors. A separate conservative check also detects escaped/entity-encoded
+  `video:` schemes; any residue keeps the note `generated` with a blocking review finding. Such unprotected
+  untaught notes are omitted from static export until fixed; edited notes remain authored content.
 - `status: skipped` + one line remains available for blank/title-only untaught slides, or when a transcript
   shows that the teacher merely flipped past a slide or discussed something else.
 - Resume refreshes unprotected `untaught` notes only when `inputs` changes. Once a slide gains video ranges,

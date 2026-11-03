@@ -178,9 +178,11 @@ class Reviewer:
             status, new = parse_output(reply)
             if not new:
                 break
-            if status == "skipped":
-                return "skipped", new, []
             if m.untaught:
+                new = untaught_body(new, skipped=status == "skipped")
+            if status == "skipped":
+                if not (m.untaught and rules.check_links(new, m)):
+                    return "skipped", new, []
                 new = untaught_body(new)
             current = new
             todo = blocking(rules.check(current, m))

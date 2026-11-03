@@ -14,10 +14,11 @@ from pathlib import Path
 
 from .. import config
 from ..llm import claude
-from ..store import Course
+from ..store import Course, write_json
 from . import notefile, rules
 from .batch import Progress, run_slides, select
 from .material import Gatherer, Material, render
+from .video_links import strip_video_links
 
 STYLE = (Path(__file__).parent / "style.md").read_text("utf-8")
 SYSTEM = f"""你是幫作業系統課寫講義的助教。你要把一頁投影片和老師上課講的內容，整理成一份給沒有基礎的學生讀的筆記。
@@ -76,10 +77,10 @@ def prompt(m: Material) -> str:
     return f"{render(m)}\n\n{TASK.format(index=m.index, links=links, skip=skip)}"
 
 
-def untaught_body(body: str) -> str:
+def untaught_body(body: str, *, skipped: bool = False) -> str:
     """Keep the disclosure and exclude model-invented video citations, including after revision."""
-    body = rules.LINK.sub("", body).strip()
-    return body if body.startswith(UNTAUGHT_NOTICE) else f"{UNTAUGHT_NOTICE}\n\n{body}"
+    body = strip_video_links(body)
+    return body if skipped or body.startswith(UNTAUGHT_NOTICE) else f"{UNTAUGHT_NOTICE}\n\n{body}"
 
 
 def meta(m: Material, status: str, partial: str | None = None) -> dict:
@@ -110,10 +111,22 @@ async def write_note(course: Course, m: Material, force: bool = False) -> str:
     status, body = parse_output(await claude.complete(call))
     if not body:
         raise RuntimeError(f"第 {m.index} 頁模型沒有回傳內容")
-    if m.untaught and status != "skipped":
-        body = untaught_body(body)
+    findings = []
+    if m.untaught:
+        body = untaught_body(body, skipped=status == "skipped")
+        findings = rules.check_links(body, m)
+        if findings:
+            status = "generated"
+            body = untaught_body(body)
     partial = m.inputs if m.partial else None
-    return status if notefile.commit(path, meta(m, status, partial), body, base, force) else "kept"
+    if not notefile.commit(path, meta(m, status, partial), body, base, force):
+        return "kept"
+    if findings:
+        write_json(course.review_path(m.deck["id"], m.index), {
+            "findings": findings, "unresolved": findings, "reviewedHash": notefile.digest(body),
+            "noteHash": notefile.digest(body), "revised": False, "reviewedAt": notefile.now(),
+        })  # fmt: skip
+    return status
 
 
 def _wanted(g: Gatherer, slides: list[int] | None, force: bool):

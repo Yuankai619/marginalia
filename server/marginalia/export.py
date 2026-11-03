@@ -13,6 +13,7 @@ from urllib.parse import unquote, urlsplit
 import yaml
 
 from . import config, note_assets
+from .notes.video_links import has_video_links
 from .store import (
     Course,
     _directory_fd,
@@ -98,6 +99,8 @@ def _note(course: Course, deck: str, index: int) -> dict | None:
         "edited",
         "skipped",
     }:
+        return None
+    if meta.get("untaught") and status != "edited" and has_video_links(body):
         return None
     public_meta = {"status": status}
     if meta.get("updatedAt"):
