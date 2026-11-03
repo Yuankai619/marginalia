@@ -2,24 +2,51 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict
+from itertools import pairwise
 
 from .. import config
 from .context import ExamContext, PastQuestion, Progress
-from .generation import checkpoint, data, parallel
+from .generation import GenerationError, checkpoint, data, parallel
 from .prompts import PAST_REVIEW, PAST_SYSTEM, PAST_TASK
 from .schema import TYPES, json_reply
 
 MAX_PER_UPLOAD = 100
 TEXT_CHARS = 36_000
-OVERLAP = 2_000
+_QUESTION = re.compile(
+    r"^[ \t]{0,3}(?:#{1,6}[ \t]+)?(?:"
+    r"(?:Question|Q)[ \t]*[0-9]{1,3}\b|第[0-9一二三四五六七八九十百]+題|"
+    r"(?:[0-9]{1,3}|[一二三四五六七八九十百]+)[.．、:：)）](?![0-9])|"
+    r"[（(](?:[0-9]{1,3}|[一二三四五六七八九十百]+)[)）])",
+    re.MULTILINE | re.IGNORECASE,
+)
 
 
 def text_parts(text: str) -> list[str]:
-    """Overlapping windows keep question continuations; exact repeats are removed after verification."""
-    if not text:
-        return [""]
-    return [text[start:start + TEXT_CHARS] for start in range(0, len(text), TEXT_CHARS - OVERLAP)]
+    """Pack complete numbered questions, repeating the shared preamble in each batch.
+
+    An ambiguous large paper fails visibly instead of silently cutting a stem/table in half. Small unnumbered
+    papers still travel whole; numbering is only needed to split material exceeding a single-call budget.
+    """
+    if len(text) <= TEXT_CHARS:
+        return [text]
+    starts = [m.start() for m in _QUESTION.finditer(text)]
+    if not starts:
+        raise GenerationError("文字考古題太長且沒有可辨識的題號，請依題目分檔或加入題號後重試")
+    preamble = text[:starts[0]]
+    out, current = [], preamble
+    for a, b in pairwise([*starts, len(text)]):
+        block = text[a:b]
+        if len(preamble) + len(block) > TEXT_CHARS:
+            raise GenerationError("單一考古題或共同題幹過長，請依完整子題分檔後重試")
+        if len(current) + len(block) > TEXT_CHARS:
+            out.append(current)
+            current = preamble
+        current += block
+    if current != preamble:
+        out.append(current)
+    return out
 
 
 def parse_questions(reply: str, upload: str) -> list[PastQuestion]:
@@ -74,7 +101,7 @@ async def _parse_uploads(ctx: ExamContext, progress: Progress) -> list[PastQuest
                                        PAST_SYSTEM, verified, images)
             for question in checked:
                 key = data([question.number, question.prompt, question.options])
-                # Deduplicate only between overlapping windows, never repeated subquestions in the same window.
+                # Keep repeated subquestions inside a batch; only repeated shared context crosses batches.
                 if key not in seen:
                     out.append(question)
             seen.update(data([p.number, p.prompt, p.options]) for p in checked)

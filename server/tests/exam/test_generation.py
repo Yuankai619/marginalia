@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import asdict
-from itertools import pairwise
 
 import pytest
 
@@ -244,12 +243,17 @@ def test_parallel_failure_cancels_own_siblings():
     assert sorted(cancelled) == [0, 2]
 
 
-def test_paper_windows_do_not_drop_tail():
-    text = "x" * (past.TEXT_CHARS * 3) + "最後一題"
-    pieces = past.text_parts(text)
-    assert pieces[-1].endswith("最後一題")
-    assert all(len(p) <= past.TEXT_CHARS for p in pieces)
-    assert all(a[-past.OVERLAP:] == b[:past.OVERLAP] for a, b in pairwise(pieces))
+def test_paper_batches_keep_boundary_question_and_shared_preamble():
+    preamble = "共同作答說明：依下列資料回答。\n"
+    blocks = [f"{i}. 題幹{i}：" + "x" * (4000 if i == 31 else 1100) + f"\n題尾{i}。\n" for i in range(1, 55)]
+    pieces = past.text_parts(preamble + "".join(blocks))
+    assert len(pieces) > 1
+    assert all(p.startswith(preamble) and len(p) <= past.TEXT_CHARS for p in pieces)
+    assert all(sum(block in p for p in pieces) == 1 for block in blocks)
+    assert "".join(p[len(preamble):] for p in pieces) == "".join(blocks)
+    for text in ("無題號" * past.TEXT_CHARS, "1. " + "x" * past.TEXT_CHARS):
+        with pytest.raises(GenerationError, match="分檔"):
+            past.text_parts(text)
 
 
 @pytest.mark.parametrize("labels", [["1", "2"], ["a", "b"], ["(A)", "(B)"]])
