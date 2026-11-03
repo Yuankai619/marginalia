@@ -36,6 +36,8 @@ export default defineConfig({
   base: process.env.VITE_BASE_PATH || "/",
   plugins: [react(), tailwindcss(), staticCsp],
   resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },
+  // Preview serves only the exported snapshot; Vite otherwise inherits the dev proxies.
+  preview: { proxy: {} },
   server: {
     port: 5173,
     headers: { "Content-Security-Policy": DEV_CSP },

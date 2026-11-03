@@ -76,6 +76,19 @@ async function exportedStatic(browser) {
    assert.equal(await page.getByRole('button',{name,exact:true}).count(),0);
  };
  try {
+  // APIRequestContext bypasses page.route: these probes exercise the actual preview server.
+  for(const path of ['/files/fixture/generated/decks/deck/slides/001.webp','/files/fixture/generated/decks/deck/thumbs/001.webp','/files/fixture/notes/deck/assets/架構圖.svg']){
+   const response=await page.request.get(preview+path);
+   assert.equal(response.status(),200,path);
+   assert.match(response.headers()['content-type'],/^image\//);
+   assert((await response.body()).length>0);
+  }
+  const origin=new URL(preview).origin;
+  for(const url of new Set([origin+'/api/health',preview+'/api/health',preview+'/files/unexported/materials/secret.mp4'])){
+   const response=await page.request.get(url,{headers:{Accept:'application/json'}});
+   assert.equal(response.status(),404,url);
+  }
+  console.log('PASS actual preview HTTP: exported slides/thumbs/SVG return 200; API and unexported files return 404');
   await page.goto(preview+'/');
   await page.getByRole('heading',{name:'我的課程',exact:true}).waitFor();
   await noEditing();

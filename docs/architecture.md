@@ -266,6 +266,9 @@ base when loading deck images. Static mutations reject, account/history reads re
 and local-only UI controls are gated by `editable`. Hosts must fall back to `index.html` for reader routes;
 the build includes `404.html` for GitHub Pages. Mermaid, highlights, alerts and image rendering are shared
 with local mode. Static notes carry no review record and hide the internal review tab.
+`vite preview` explicitly sets `preview.proxy: {}` so it never inherits the local dev proxies:
+exported `/files` are served from dist; local API and unexported files stay unavailable through preview,
+even when a local backend is running.
 
 Hosting: serve `.svg` files with `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:`
 (what `/files` sends locally), so an image opened on its own cannot load anything. `index.html` carries its own
