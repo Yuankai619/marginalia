@@ -69,6 +69,9 @@ def check_links(body: str, m: Material) -> list[dict]:
     for lk in LINK.finditer(body):
         label, video, t = lk.groups()
         quote = _context(body, lk.start(), lk.end())
+        if m.untaught:
+            out.append(_finding("high", quote, "課堂未講解頁不能有影片時間點連結。", "移除連結，只依投影片整理。"))
+            continue
         if not SECONDS.fullmatch(t):
             out.append(_finding("high", quote, f"時間點 t={t} 不是秒數。", "改成逐字稿裡那一句的秒數。"))
             continue

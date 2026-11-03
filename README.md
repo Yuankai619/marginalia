@@ -284,11 +284,15 @@ Subscription usage is not a fixed token budget. The writer makes approximately o
 | `generated` | Written by the note writer. |
 | `reviewed` | Required reviewers completed and no blocking rule findings remain; findings live under `generated/reviews/`. |
 | `edited` | Saved by the user through the editor. |
-| `skipped` | The slide was not taught; the note contains a brief reason. |
+| `skipped` | A blank/title-only untaught slide, or a transcript-confirmed skipped slide; the note contains a brief reason. |
 
 **Normal generation and review never overwrite `edited` notes.** A hand-written note without a `status` is protected in the same way. If you edit an existing generated Markdown file directly, change its frontmatter to `status: edited`. Writes also compare the file with the version the job started from, so a concurrent edit is kept. Internal generation/review functions support an explicit force override; the CLI has no such flag. Review can still record findings for an edited note without changing its text.
 
 A note written while alignment or transcription is incomplete carries `partial: true` and an `inputs` content fingerprint. Rerunning generation refreshes it only when its own ranges, transcript content/completeness, or pending videos change. Courses without recordings, audio-only courses, and decks with no aligned video after alignment completes get final slide-only notes.
+
+Within an aligned deck, slides with no video ranges still get notes based on their images, text, and speaker notes. These notes begin with 「本頁課堂未講解，以下根據投影片整理。」 in an IMPORTANT callout and contain no video timestamps or invented classroom explanations. Their frontmatter uses the normal `generated` / `reviewed` status plus `untaught: true`, `sources: []`, and an `inputs` fingerprint. Review checks them against the slides without requiring a transcript. The callout remains visible in both the local reader and static exports.
+
+Rerunning generation also upgrades old automatic “not shown” skipped notes. It leaves unchanged untaught notes alone until their inputs change; when a recording is later aligned to the slide, it rewrites them as regular notes with transcript timestamps when available and removes `untaught`. Edited and hand-written notes remain protected.
 
 Review leaves a note as `generated` when blocking findings remain after at most two revision rounds. Notes longer than 20,000 characters receive local rule checks only and are never automatically rewritten by the reviewer. Review records include hashes of the reviewed and final note text; a record that matches neither version is stale.
 

@@ -52,6 +52,7 @@ class Material:
     ranges: list[dict]
     lines: list[dict] = field(default_factory=list)  # {video, start, text}
     partial: bool = False  # some on-screen range has no transcript yet
+    untaught: bool = False  # this deck was aligned, but this slide has no on-screen ranges
 
     inputs: str = ""  # fingerprint of everything alignment/transcription contributed to this slide
 
@@ -129,6 +130,7 @@ class Gatherer:
             ranges=ranges,
             lines=lines,
             partial=partial,
+            untaught=self.aligned and not ranges,
             inputs=self._fingerprint(ranges, lines, partial),
         )
 
