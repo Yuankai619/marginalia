@@ -69,8 +69,8 @@ const validChoice = (value: unknown) =>
   typeof value === "object" &&
   typeof (value as Choice).account === "string";
 
-/** Accounts, the chosen model, chat history and the streaming conversation for one course. */
-export function useChat(data: DataAdapter, courseId: string) {
+/** Logged-in accounts and the model the user picked, shared by the chat panel and exam grading. */
+export function useAgentChoice(data: DataAdapter) {
   const [accounts, setAccounts] = useState<Account[] | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
   const [stored, setStored] = useStored<Choice | null>(
@@ -78,12 +78,6 @@ export function useChat(data: DataAdapter, courseId: string) {
     null,
     validChoice,
   );
-  const [sessions, setSessions] = useState<ChatSummary[]>([]);
-  const [chatId, setChatId] = useState<string | null>(null);
-  const [mode, setMode] = useState<ChatMode>("qa");
-  const [items, setItems] = useState<AgentItem[]>([]);
-  const [running, setRunning] = useState(false);
-  const controller = useRef<AbortController | null>(null);
 
   const loadAccounts = useCallback(async () => {
     setAccountError(null);
@@ -97,9 +91,7 @@ export function useChat(data: DataAdapter, courseId: string) {
 
   useEffect(() => {
     void loadAccounts();
-    data.chats(courseId).then(setSessions, () => setSessions([]));
-    return () => controller.current?.abort();
-  }, [data, courseId, loadAccounts]);
+  }, [loadAccounts]);
 
   const ready = accounts?.filter((account) => account.loggedIn) ?? [];
   const account =
@@ -129,6 +121,39 @@ export function useChat(data: DataAdapter, courseId: string) {
         next.effort ??
         (next.account && next.account !== account?.id ? "" : effort),
     });
+  return {
+    accounts,
+    accountError,
+    loadAccounts,
+    account,
+    model,
+    effort,
+    choose,
+  };
+}
+
+/** Accounts, the chosen model, chat history and the streaming conversation for one course. */
+export function useChat(data: DataAdapter, courseId: string) {
+  const {
+    accounts,
+    accountError,
+    loadAccounts,
+    account,
+    model,
+    effort,
+    choose,
+  } = useAgentChoice(data);
+  const [sessions, setSessions] = useState<ChatSummary[]>([]);
+  const [chatId, setChatId] = useState<string | null>(null);
+  const [mode, setMode] = useState<ChatMode>("qa");
+  const [items, setItems] = useState<AgentItem[]>([]);
+  const [running, setRunning] = useState(false);
+  const controller = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    data.chats(courseId).then(setSessions, () => setSessions([]));
+    return () => controller.current?.abort();
+  }, [data, courseId]);
 
   const newChat = () => {
     if (running) return;

@@ -6,7 +6,7 @@ import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { assetUrl } from "@/lib/assets";
+import { type ImageSource, imageUrl } from "@/lib/assets";
 import { remarkAlerts, remarkHighlight } from "@/lib/remark-notes";
 import type { VideoTime } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -117,7 +117,7 @@ const keepUrl = (url: string) => url; // hrefs are vetted by the sanitizer, imag
 const remarkPlugins = [remarkGfm, remarkMath, remarkAlerts, remarkHighlight];
 const rehypePlugins = [rehypeRaw, sanitizeNoteHtml, rehypeKatex];
 
-export type NoteSource = { courseId: string; deckId: string };
+export type NoteSource = ImageSource;
 
 function Figure({ src, alt }: { src: string; alt: string }) {
   const [zoom, setZoom] = useState(false);
@@ -202,9 +202,7 @@ function MarkdownView({
       },
       img: ({ src, alt }) => {
         const url =
-          source && typeof src === "string"
-            ? assetUrl(source.courseId, source.deckId, src)
-            : null;
+          source && typeof src === "string" ? imageUrl(source, src) : null;
         if (!url)
           return (
             <span className="text-muted-foreground">

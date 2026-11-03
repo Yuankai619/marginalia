@@ -52,6 +52,7 @@ async function fixture(page) {
   if(path.endsWith('/transcript'))return json(route,{segments:[{start:14,end:18,text:'合成逐字稿'}],partial:false});
   if(path.endsWith('/accounts'))return json(route,[account]);
   if(path.endsWith('/chats'))return json(route,[]);
+  if(path.endsWith('/exams'))return json(route,[]);
   if(path==='/api/agents/chat') return route.fulfill({contentType:'text/event-stream',body:'data: {"type":"start","chatId":"fixture-chat"}\r\n\r\ndata: {"type":"text","delta":"合成串流回覆"}\r\n\r\ndata: {"type":"done","chatId":"fixture-chat"}\r\n\r\n'});
   if(path.endsWith('/decks/deck/assets'))return json(route,{path:'assets/pasted-0123456789.png'});
   if(path.endsWith('/upload'))return json(route,{saved:['materials/tiny.pdf'],manifest:{decks:[],videos:[]}});
@@ -117,11 +118,36 @@ async function exportedStatic(browser) {
   await page.locator(NOTES+' .prose-note').waitFor();
   assert.equal(await page.locator('button.timestamp').count(),0);
   assert((await page.locator(NOTES+' .prose-note').innerText()).includes('00:12'));
+  // Exam prep in the static reader: handout and quiz read-only, answers checked in the browser, no agent.
+  // Preview answers unknown paths with index.html; what matters is that the upload's text is never served.
+  for(const url of [preview+'/files/fixture/exams/midterm/uploads/secret-paper.md',preview+'/files/fixture/exams/midterm/attempts/'+'a'.repeat(32)+'.json']){
+   const response=await page.request.get(url,{headers:{Accept:'application/json'}});
+   assert(response.status()===404||!(await response.text()).includes('不可匯出'),url);
+  }
+  await page.setViewportSize({width:1440,height:1000});
+  await page.goto(preview+'/c/fixture');
+  await page.getByRole('link',{name:/期中考/}).click();
+  await page.waitForURL('**/exam/midterm/handout');
+  await page.locator('.prose-note mark').waitFor();
+  assert(await page.locator('.prose-note img[alt="投影片"]').evaluate(i=>i.complete&&i.naturalWidth>0));
+  assert.equal(await page.locator('.prose-note img[alt="隱藏"]').count(),0);
+  assert.equal(await page.getByRole('button',{name:'準備',exact:true}).count(),0);
+  await noEditing();
+  await page.getByRole('button',{name:'模擬考',exact:true}).click();
+  await page.getByText('合成選擇題').waitFor();
+  assert.equal(await page.getByText('合成詳解').count(),0);
+  await page.getByLabel(/對/).check();
+  await page.getByLabel('你的答案').fill('合成作答');
+  await page.getByRole('button',{name:'交卷並對答案'}).click();
+  await page.getByText('合成詳解').waitFor();
+  await page.getByText('合成參考答案').waitFor();
+  assert.equal(await page.getByRole('button',{name:/Agent/}).count(),0);
+  assert(await page.evaluate(()=>JSON.parse(localStorage.getItem('marginalia.exam.fixture.midterm'))[0].score===2));
   await page.goto(preview+'/c/fixture/edit');
   await page.waitForURL(preview+'/');
   await noEditing();
   assert.deepEqual(api,[]);assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
-  console.log('PASS actual static export: course/deck JSON, subpath, images, mermaid/highlight/callout, Unicode video URLs, text timestamps, mobile and read-only routes');
+  console.log('PASS actual static export: course/deck JSON, subpath, images, mermaid/highlight/callout, Unicode video URLs, text timestamps, mobile and read-only routes, exam handout/quiz with local checking');
  } finally {await page.close();}
 }
 async function unicodeVideoLinks(browser, base) {
@@ -304,6 +330,112 @@ async function uploadCancelledByLayout(browser, base) {
   console.log('PASS uploads cancelled by collapsing or resizing restore the draft; placeholders are never saved');
  }finally{await context.close();}
 }
+// Exam prep: setup, handout with slide images and editing, mock exam answering, 對答案 and repeat agent grading.
+async function examFlow(browser, base) {
+ const context=await browser.newContext({viewport:{width:1440,height:1000}});
+ const page=await context.newPage();
+ const errors=[], requests=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ let dismissDialog=false, dialogs=0;
+ page.on('dialog',dialog=>{dialogs++;return dismissDialog?dialog.dismiss():dialog.accept();});
+ await page.route('**/fixture.svg',r=>r.fulfill({contentType:'image/svg+xml',body:image}));
+ await page.route('**/files/fixture/generated/decks/deck/slides/*.webp',r=>r.fulfill({contentType:'image/svg+xml',body:image}));
+ const exam={id:'midterm',title:'期中考',scope:{decks:['deck'],videos:[]},options:{minutes:30}};
+ let sections=[{section:1,title:'行程與中斷',status:'generated',sources:['deck#1'],markdown:'> [!IMPORTANT]\n> ==中斷讓 CPU 先處理緊急事件==。\n\n![投影片一](slide:deck/1)\n\n![外部](https://example.com/x.png)'},
+  {section:2,title:'記憶體管理',status:'generated',sources:[],markdown:'**Paging** 把記憶體切成固定大小。'}];
+ const questions=[
+  {id:'q1',type:'choice',origin:'past',prompt:'哪個會讓行程進入 waiting？',options:[{id:'A',text:'時間片用完'},{id:'B',text:'等待 I/O'}],answer:['B'],multiple:false,points:2,solution:'等待 I/O 時行程不能用 CPU。'},
+  {id:'q2',type:'fill',origin:'new',prompt:'{{1}} 演算法可能造成 {{2}}。',blanks:[['SJF'],['starvation','飢餓']],points:4},
+  {id:'q3',type:'short',origin:'new',prompt:'說明 context switch 的成本。',points:6,solution:'保存與載入 PCB。',rubric:[{point:'提到 PCB',points:6}]},
+ ];
+ const quiz={hash:'h1',questions};
+ let attempt=null, gradings=0;
+ await page.route('**/api/**',async route=>{
+  const request=route.request(), path=new URL(request.url()).pathname, method=request.method();
+  requests.push({path,method,body:request.postData()});
+  if(path==='/api/courses/fixture')return json(route,course);
+  if(path.endsWith('/alignment'))return json(route,{videos:{},segments:[]});
+  if(path==='/api/courses/fixture/exams')return json(route,[{id:'midterm',title:'期中考',sectionCount:2,questionCount:3}]);
+  if(path==='/api/courses/fixture/exams/midterm')return method==='PUT'?json(route,{...exam,...JSON.parse(request.postData())}):json(route,{exam,uploads:[{name:'past.png',kind:'image',size:10,url:'/fixture.svg'}],handout:sections.map(({markdown,...s})=>s),quiz:{questionCount:3,hash:'h1'}});
+  if(path.endsWith('/midterm/handout'))return json(route,sections);
+  const section=/\/handout\/(\d+)$/.exec(path);
+  if(section){
+   const n=Number(section[1]);
+   if(method==='PUT'){const markdown=JSON.parse(request.postData()).markdown;sections=sections.map(s=>s.section===n?{...s,markdown,status:'edited'}:s);return json(route,{meta:{section:n,title:sections[n-1].title,status:'edited'}});}
+   return json(route,{markdown:sections[n-1].markdown,meta:sections[n-1]});
+  }
+  if(path.endsWith('/decks/deck'))return json(route,{deck:course.decks[0],slides});
+  if(path.endsWith('/quiz'))return json(route,quiz);
+  if(path.endsWith('/midterm/attempts')){
+   if(method==='GET')return json(route,[]);
+   const answers=JSON.parse(request.postData()).answers;
+   attempt={id:'a'.repeat(32),quizHash:'h1',submittedAt:meta.updatedAt,answers,gradings:{},
+    results:{q1:{status:'correct',score:2,maxScore:2},q2:{status:'partial',score:2,maxScore:4},q3:{status:'pending',score:null,maxScore:6}},score:4,maxScore:12};
+   return json(route,attempt);
+  }
+  if(path.endsWith('/grade')){
+   const body=JSON.parse(request.postData());gradings++;
+   const grading={id:`g${gradings}`,answer:body.answer,score:gradings===1?2:6,maxScore:6,verdict:gradings===1?'partial':'correct',summary:gradings===1?'少了 PCB':'完整',issues:gradings===1?[{quote:'要花時間',problem:'沒說花在哪裡',fix:'寫出保存 PCB'}]:[],missing:gradings===1?['提到 PCB']:[],createdAt:meta.updatedAt};
+   attempt={...attempt,gradings:{q3:[...(attempt.gradings.q3??[]),grading]},results:{...attempt.results,q3:{status:grading.verdict,score:grading.score,maxScore:6}},score:4+grading.score};
+   return json(route,{grading,attempt});
+  }
+  if(path.endsWith('/accounts'))return json(route,[account]);
+  if(path.endsWith('/chats'))return json(route,[]);
+  throw new Error(`Unhandled exam fixture: ${path}`);
+ });
+ try {
+  await page.goto(base+'/c/fixture');
+  await page.getByRole('heading',{name:'考前複習'}).waitFor();
+  await page.getByRole('link',{name:/期中考/}).click();
+  await page.waitForURL('**/exam/midterm/handout');
+  await page.getByRole('heading',{name:/行程與中斷/}).waitFor();
+  assert.equal(await page.locator('.prose-note img[alt="投影片一"]').getAttribute('src'),'/files/fixture/generated/decks/deck/slides/001.webp');
+  assert.equal(await page.locator('.prose-note img[alt="外部"]').count(),0);
+  assert.equal(await page.getByRole('navigation',{name:'目錄'}).getByRole('link').count(),2);
+  // Edit a section with the note editor and save it.
+  await page.getByRole('button',{name:'編輯',exact:true}).first().click();
+  await page.locator('.cm-content').fill('改寫後的段落 ==重點==');
+  // Switching tabs with an unsaved draft asks first; staying keeps the draft.
+  dismissDialog=true;
+  await page.getByRole('button',{name:'模擬考',exact:true}).click();
+  for(let i=0;i<50&&!dialogs;i++)await page.waitForTimeout(100);
+  await page.waitForFunction(()=>document.querySelector('.cm-content')?.innerText.includes('改寫後的段落'));
+  assert(page.url().endsWith('/handout'));assert.equal(dialogs,1);
+  dismissDialog=false;
+  await page.getByRole('button',{name:'完成',exact:true}).click();
+  await page.getByText('改寫後的段落').waitFor();
+  assert.equal(JSON.parse(requests.find(r=>r.method==='PUT'&&r.path.endsWith('/handout/1')).body).markdown,'改寫後的段落 ==重點==');
+  if(process.env.WEB_SCREENSHOTS){fs.mkdirSync(process.env.WEB_SCREENSHOTS,{recursive:true});await page.screenshot({path:process.env.WEB_SCREENSHOTS+'/exam-handout.png'});}
+  // Setup tab lists uploads and saves scope.
+  await page.getByRole('button',{name:'準備',exact:true}).click();
+  await page.getByText('past.png').waitFor();
+  // Mock exam: answer, submit, check.
+  await page.getByRole('button',{name:'模擬考',exact:true}).click();
+  await page.getByText('哪個會讓行程進入 waiting？').waitFor();
+  assert.equal(await page.getByText('等待 I/O 時行程不能用 CPU。').count(),0); // solutions hidden before checking
+  await page.getByLabel(/等待 I\/O/).check();
+  await page.locator('input:not([type])').first().fill('sjf');
+  await page.getByLabel('你的答案').fill('要花時間');
+  await page.getByText('已作答 3 / 3').waitFor();
+  await page.getByRole('button',{name:'交卷並對答案'}).click();
+  await page.getByText('等待 I/O 時行程不能用 CPU。').waitFor();
+  assert.deepEqual(JSON.parse(requests.find(r=>r.method==='POST'&&r.path.endsWith('/attempts')).body).answers,{q1:['B'],q2:['sjf',''],q3:'要花時間'});
+  await page.getByRole('button',{name:'請 Agent 批改'}).click();
+  await page.getByText('沒說花在哪裡').waitFor();
+  await page.getByLabel('改寫答案').fill('要保存與載入 PCB');
+  await page.getByRole('button',{name:'改寫後再批改'}).click();
+  await page.getByText('第 2 次批改').waitFor();
+  assert.equal(await page.getByText('第 1 次批改').count(),1);
+  assert.equal(JSON.parse(requests.filter(r=>r.path.endsWith('/grade')).at(-1).body).answer,'要保存與載入 PCB');
+  await page.getByRole('button',{name:'只看錯題'}).click();
+  assert.equal(await page.getByText('哪個會讓行程進入 waiting？').count(),0);
+  await page.setViewportSize({width:375,height:812});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),375);
+  if(process.env.WEB_SCREENSHOTS)await page.screenshot({path:process.env.WEB_SCREENSHOTS+'/exam-quiz-mobile.png'});
+  assert.deepEqual(errors,[]);
+  console.log('PASS exam prep: handout slide images and editing, mock exam answers, 對答案, repeat agent grading, mobile width');
+ } finally {await context.close();}
+}
 async function run() {
  const browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/usr/bin/google-chrome',args:['--no-sandbox']});
  const errors=[];
@@ -419,6 +551,7 @@ async function run() {
   await landscapeOverlays(browser,local);
   await uploadCancelledByLayout(browser,local);
   await unicodeVideoLinks(browser,local);
+  await examFlow(browser,local);
 
   assert.deepEqual(errors,[]);
   console.log('PASS: local/static contracts, draft protection, review cards, image paste, real images/video source, region/chat SSE, upload/scan, stable job SSE/reconnect, mobile overflow, URL sanitization');

@@ -1,0 +1,152 @@
+"""The `exam` job: build the context, run the generator parts, validate and write their output.
+
+Generators (past.py, handout.py, quiz.py) never write handout/, quiz.json or attempts/; this module does, after
+checking every section and question against the contract (docs/architecture.md, Exam prep).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from collections.abc import Callable
+
+from ..jobs import JobError
+from ..notes import notefile
+from ..notes.rules import normalize_links
+from ..store import Course, unlink_output
+from . import context, handout, past, quiz, schema
+from .context import Engine, PastQuestion, Section
+from .grade import normalize
+from .store import Exam
+
+PARTS = ("handout", "quiz")
+MAX_QUESTIONS = 200  # a runaway (or injected) model reply must not produce an unusable quiz
+_IMAGE = re.compile(r"!\[([^\]\n]*)\]\(([^)\s]*)\)")
+
+
+class ExamError(JobError):
+    """A generation failure whose message is safe to show the user."""
+
+
+def fix_images(markdown: str, exam: Exam, decks: dict[str, int]) -> str:
+    """Keep `slide:` images of real slides and `assets/` images that exist; other plain `![…](…)` images become their
+    caption. Titled, reference-style and raw-HTML images are left for the renderer, whose allowlist (imageUrl in
+    apps/web/src/lib/assets.ts) shows them as text."""
+
+    def keep(m: re.Match[str]) -> str:
+        caption, src = m[1], m[2]
+        if (s := re.fullmatch(r"slide:([\w][\w-]*)/(\d+)", src)) and 1 <= int(s[2]) <= decks.get(s[1], 0):
+            return m[0]
+        a = re.fullmatch(r"assets/([\w][\w.-]*)", src)
+        if a and ".." not in a[1] and (exam.dir / "handout" / "assets" / a[1]).is_file():
+            return m[0]
+        return f"［圖：{caption}］" if caption else ""
+
+    return _IMAGE.sub(keep, markdown)
+
+
+def _key(text: str) -> str:
+    return normalize(re.sub(r"[\W_]+", "", text))
+
+
+def _past_question(p: PastQuestion) -> dict:
+    """A past-paper question the quiz writer left out: kept as a short-answer question with no rubric, its printed
+    options listed under the prompt (they often carry the statements being asked about)."""
+    options = "\n".join(f"- ({o.get('id', '')}) {o.get('text', '')}" for o in p.options if o.get("text"))
+    prompt = f"{p.prompt}\n\n{options}" if options else p.prompt
+    return {"type": "short", "origin": "past", "pastRef": p.upload, "prompt": prompt, "points": 6,
+            "topic": f"考古題 {p.number}".strip()}  # fmt: skip
+
+
+def write_sections(exam: Exam, sections: list[Section], decks: dict[str, int], force: bool) -> str:
+    """Replace the handout unless the user edited any section meanwhile. Returns `written` or `kept`."""
+    existing = exam.section_numbers()
+    edited = {n for n in existing if (s := exam.section(n)) is not None and notefile.protected(s[0])}
+    if edited and not force:
+        return "kept"
+    for n, section in enumerate(sections, 1):
+        path = exam.section_path(n)
+        meta = {"section": n, "title": section.title, "status": "generated",
+                "sources": [f"{d}#{i}" for d, i in section.sources if 1 <= i <= decks.get(d, 0)],
+                "updatedAt": notefile.now()}  # fmt: skip
+        body = fix_images(normalize_links(section.markdown), exam, decks)
+        if not notefile.commit(path, meta, body, notefile.version(path), force=force):
+            raise ExamError(f"第 {n} 節在產生期間被修改，已保留你的版本")
+    for n in existing:
+        if n > len(sections) and n not in edited:
+            unlink_output(exam.section_path(n))
+    return "written"
+
+
+def clean_quiz(exam: Exam, raw: list[dict], past_questions: list[PastQuestion], decks: dict[str, int]) -> tuple[list[dict], int]:
+    """Validated questions (past-paper ones first) and how many were dropped."""
+    questions = [q for q in (schema.clean_question(q, decks) for q in raw[: MAX_QUESTIONS * 2]) if q]
+    dropped = len(raw) - len(questions)
+    # The quiz writer must keep every past-paper question; put back any it left out (matched on the prompt's start).
+    # Each parsed question consumes one quiz question whose prompt contains it (the writer may add a lead-in or
+    # options); counting, not a set, so sub-questions sharing an introduction are matched one by one.
+    unmatched = [(q.get("pastRef"), _key(q["prompt"])) for q in questions if q["origin"] == "past"]
+    for p in past_questions:
+        key = _key(p.prompt)
+        found = next((i for i, (ref, text) in enumerate(unmatched) if ref == p.upload and key and key in text), None)
+        if found is None:
+            questions.append(schema.clean_question(_past_question(p), decks))
+        else:
+            unmatched.pop(found)
+    for q in questions:
+        for key in ("prompt", "solution"):
+            if q.get(key):
+                q[key] = fix_images(q[key], exam, decks)
+    questions.sort(key=lambda q: q["origin"] != "past")  # stable: past papers first, in their order
+    return schema.number(questions[:MAX_QUESTIONS]), dropped
+
+
+async def agenerate(course: Course, exam_id: str, *, parts: list[str] | None = None, force: bool = False,
+                    engine: Engine | None = None, progress: Callable[[float, str], None] | None = None) -> str:  # fmt: skip
+    progress = progress or (lambda f, m: None)
+    exam = Exam(course, exam_id)
+    if not exam.exists():
+        raise ExamError("找不到考試")
+    parts = [p for p in PARTS if p in (parts or PARTS)]
+    if not parts:
+        raise ExamError("沒有指定要產生的內容")
+    ctx = await asyncio.to_thread(context.load, exam, engine)
+    if not ctx.decks:
+        raise ExamError("考試範圍沒有任何簡報")
+    decks = ctx.slide_count()
+    # The handout and the past-paper → quiz chain are independent: run them side by side, one progress bar.
+    weights = {"handout": 0.6 if "handout" in parts else 0.0, "quiz": 0.4 if "quiz" in parts else 0.0}
+    done = dict.fromkeys(weights, 0.0)
+
+    def report(part: str, start: float = 0.0, share: float = 1.0) -> Callable[[float, str], None]:
+        def update(fraction: float, message: str) -> None:
+            done[part] = start + share * max(0.0, min(1.0, fraction))
+            progress(sum(done[k] * w for k, w in weights.items()) / sum(weights.values()), message)
+
+        return update
+
+    async def make_handout() -> str:
+        sections = await handout.write_handout(ctx, report("handout"))
+        if not sections:
+            raise ExamError("模型沒有寫出任何講義段落")
+        if write_sections(exam, sections, decks, force) == "kept":
+            return "講義已有你編輯過的段落，未覆寫"
+        return f"講義 {len(sections)} 節"
+
+    async def make_quiz() -> str:
+        share = 0.35 if ctx.uploads else 0.0
+        past_questions = await past.parse_uploads(ctx, report("quiz", 0.0, share)) if ctx.uploads else []
+        raw = await quiz.write_quiz(ctx, past_questions, report("quiz", share, 1 - share))
+        questions, dropped = clean_quiz(exam, raw, past_questions, decks)
+        if not questions:
+            raise ExamError("模型沒有產生任何有效題目")
+        exam.save_quiz(questions)
+        return f"題目 {len(questions)} 題" + (f"（略過 {dropped} 題格式不符）" if dropped else "")
+
+    jobs = [make_handout() if part == "handout" else make_quiz() for part in parts]
+    return "、".join(await asyncio.gather(*jobs))
+
+
+def generate_exam(course: Course, exam_id: str, **kwargs) -> str:
+    """Blocking wrapper for job threads; returns the job's completion message."""
+    return asyncio.run(agenerate(course, exam_id, **kwargs))

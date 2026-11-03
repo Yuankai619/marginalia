@@ -13,6 +13,7 @@ MATERIALS = "materials"  # raw drops: pptx / pdf / mp4 / zip
 GENERATED = "generated"  # everything the pipeline can rebuild
 NOTES = "notes"  # per-slide markdown, the user's editable output
 CHATS = "chats"
+EXAMS = "exams"  # exam prep: handout, quiz, attempts per exam
 
 SLIDE_WIDTH = 1600  # rendered slide width in px
 THUMB_WIDTH = 320

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..llm.accounts import subscription_auth
+from ..llm.codex import account_home
 from ..store import write_json
 
 
@@ -97,7 +98,7 @@ async def _stream(
     effort: str,
     image: Path | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    home = Path.home() / (".codex" if account == "codex" else f".{account}")
+    home = account_home(account)
     auth = subscription_auth(home)
     if not auth:
         raise ValueError("指定的 Codex 帳號未以訂閱登入")

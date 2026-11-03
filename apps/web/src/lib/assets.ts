@@ -30,6 +30,12 @@ export function assetUrl(
   deckId: string,
   src: string,
 ): string | null {
+  const name = assetName(src);
+  return name && fileUrl(courseId, "notes", deckId, "assets", name);
+}
+
+/** The file name in `assets/<name>`, or null for anything that is not a plain image file in that folder. */
+function assetName(src: string): string | null {
   // remark percent-encodes non-ASCII URLs (`assets/架構圖.svg`); match the name as written in the note.
   let path = src;
   try {
@@ -39,5 +45,42 @@ export function assetUrl(
   if (!match || match[1].includes("..")) return null;
   const extension = match[1].split(".").at(-1)?.toLowerCase();
   if (!extension || !Object.hasOwn(IMAGE_FORMATS, extension)) return null;
-  return fileUrl(courseId, "notes", deckId, "assets", match[1]);
+  return match[1];
+}
+
+/** Where a markdown body's images resolve: a deck's notes, or an exam handout (docs/architecture.md, Exam prep). */
+export type ImageSource =
+  | { courseId: string; deckId: string }
+  | {
+      courseId: string;
+      examId: string;
+      /** Decks whose slide images exist here; others render as caption text. */
+      decks?: string[];
+    };
+
+const SLIDE = /^slide:([\p{L}\p{N}_][\p{L}\p{N}_-]*)\/(\d{1,4})$/u;
+
+/** URL of a note or handout image, or null for anything that is not one of the allowed forms. */
+export function imageUrl(source: ImageSource, src: string): string | null {
+  if (!("examId" in source))
+    return assetUrl(source.courseId, source.deckId, src);
+  const slide = SLIDE.exec(src);
+  if (slide) {
+    const index = Number(slide[2]);
+    if (index < 1 || (source.decks && !source.decks.includes(slide[1])))
+      return null;
+    return fileUrl(
+      source.courseId,
+      "generated",
+      "decks",
+      slide[1],
+      "slides",
+      `${String(index).padStart(3, "0")}.webp`,
+    );
+  }
+  const name = assetName(src);
+  return (
+    name &&
+    fileUrl(source.courseId, "exams", source.examId, "handout", "assets", name)
+  );
 }
