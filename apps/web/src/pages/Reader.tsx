@@ -445,7 +445,8 @@ export function Reader() {
       </AppShell>
     );
 
-  const view = digest ? reviewView(note?.review, digest) : null;
+  const view =
+    data.editable && digest ? reviewView(note?.review, digest) : null;
   const summary = view && !view.stale ? checkSummary(view) : null;
   const status = note ? (STATUS[note.meta.status] ?? STATUS.generated) : null;
   const hasNote = !!note?.markdown.trim();
@@ -722,24 +723,26 @@ export function Reader() {
             aria-label="這一頁的內容"
             className="mt-3 -mb-px flex gap-4"
           >
-            {tabs.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                role="tab"
-                aria-selected={tab === item.id}
-                onClick={() => setTab(item.id)}
-                className={cn(
-                  "flex h-9 items-center gap-1.5 border-b-2 text-[13px] outline-none transition-colors focus-visible:text-foreground",
-                  tab === item.id
-                    ? "border-foreground font-medium text-foreground"
-                    : "border-transparent text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {item.label}
-                {item.badge}
-              </button>
-            ))}
+            {tabs
+              .filter((item) => data.editable || item.id !== "checks")
+              .map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === item.id}
+                  onClick={() => setTab(item.id)}
+                  className={cn(
+                    "flex h-9 items-center gap-1.5 border-b-2 text-[13px] outline-none transition-colors focus-visible:text-foreground",
+                    tab === item.id
+                      ? "border-foreground font-medium text-foreground"
+                      : "border-transparent text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {item.label}
+                  {item.badge}
+                </button>
+              ))}
           </div>
         )}
       </header>

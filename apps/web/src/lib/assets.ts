@@ -17,9 +17,12 @@ export const uploadPlaceholder = (name: string) =>
 /** Any upload placeholder left in a note; such a note must not be saved (the image never arrived). */
 export const UPLOAD_PLACEHOLDER = /!\[上傳中：[^\]\n]*\]\(\)/;
 
+export const siteUrl = (path: string) =>
+  `${import.meta.env?.BASE_URL ?? "/"}${path.replace(/^\//, "")}`;
+
 /** `/files/<course>/<…parts>`, each segment encoded; the one place course file URLs are built. */
 export const fileUrl = (courseId: string, ...parts: string[]) =>
-  `/files/${[courseId, ...parts].map(encodeURIComponent).join("/")}`;
+  siteUrl(`/files/${[courseId, ...parts].map(encodeURIComponent).join("/")}`);
 
 /** URL of a note image, or null for anything that is not a plain file under the deck's assets/ folder. */
 export function assetUrl(

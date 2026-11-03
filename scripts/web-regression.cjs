@@ -1,5 +1,8 @@
 // Run against local Vite (:5173) and a pnpm build preview (:5191).
-// Requires Playwright on NODE_PATH; all HTTP data are generated fixtures.
+// Requires Playwright on NODE_PATH. Local API data are mocked; static data must come from real exports.
+// (cd server && uv run python ../scripts/static-fixture.py <fixture-courses>)
+// MARGINALIA_COURSES=<fixture-courses> pnpm build
+// WEB_STATIC_ONLY=1 WEB_STATIC_URL=http://127.0.0.1:5178/<base> node scripts/web-regression.cjs
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const { chromium } = require('playwright');
@@ -15,7 +18,7 @@ const deck = {deck:course.decks[0],slides,notes:{'1':{markdown},'2':{markdown:'�
 const account={id:'claude',provider:'claude',label:'測試帳號',loggedIn:true,models:[{id:'sonnet',label:'Sonnet'}],efforts:['medium']};
 const NOTES = 'section[aria-label="筆記"]';
 const json = (route,body)=>route.fulfill({contentType:'application/json',body:JSON.stringify(body)});
-async function fixture(page, isStatic=false) {
+async function fixture(page) {
  const requests=[];
  await page.route('**/fixture.svg',r=>r.fulfill({contentType:'image/svg+xml',body:image}));
  await page.addInitScript(()=>{
@@ -34,7 +37,6 @@ async function fixture(page, isStatic=false) {
  await page.route('**/api/**',async route=>{
   const request=route.request(), path=new URL(request.url()).pathname;
   requests.push({path,method:request.method(),body:request.postData(),headers:request.headers()});
-  if(isStatic) throw new Error(`Static mode requested API: ${path}`);
   if(path==='/api/courses')return json(route,[info]);
   if(path==='/api/courses/fixture')return json(route,course);
   if(path.endsWith('/alignment'))return json(route,{videos:{},segments:Array.from({length:100},(_,i)=>({video:'video-b',start:i,end:i+1,deck:'deck',slide:1}))});
@@ -58,29 +60,78 @@ async function fixture(page, isStatic=false) {
   if(path==='/api/jobs/job-1'){jobReads++;return json(route,job);}
   throw new Error(`Unhandled fixture: ${path}`);
  });
- await page.route('**/data/**',route=>{
-  const path=new URL(route.request().url()).pathname;
-  if(path==='/data/courses.json')return json(route,[info]);
-  if(path.endsWith('/course.json'))return json(route,course);
-  if(path.endsWith('/decks/deck.json'))return json(route,deck);
-  if(path.endsWith('/transcripts/video-b.json'))return json(route,{segments:[],partial:false});
-  throw new Error(`Unhandled static fixture: ${path}`);
- });
  return {requests,job,jobReads:()=>jobReads};
 }
-async function unicodeVideoLinks(browser, base, isStatic) {
+async function exportedStatic(browser) {
+ const page=await browser.newPage({viewport:{width:1440,height:1000}});
+ const api=[], errors=[], failures=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ page.on('response',r=>{if(r.status()>=400)failures.push(r.url());});
+ await page.route('**/api/**',route=>{api.push(route.request().url());return route.abort();});
+ await page.route('https://example.com/**',route=>route.abort());
+ const noEditing=async()=>{
+  assert.equal(await page.locator('aside[aria-label="AI 助教"],.cm-content,input[type=file]').count(),0);
+  assert.equal(await page.getByRole('tab',{name:'筆記檢查',exact:true}).count(),0);
+  for(const name of ['編輯','產生筆記','重新掃描','AI 助教','問助教'])
+   assert.equal(await page.getByRole('button',{name,exact:true}).count(),0);
+ };
+ try {
+  // APIRequestContext bypasses page.route: these probes exercise the actual preview server.
+  for(const path of ['/files/fixture/generated/decks/deck/slides/001.webp','/files/fixture/generated/decks/deck/thumbs/001.webp','/files/fixture/notes/deck/assets/架構圖.svg']){
+   const response=await page.request.get(preview+path);
+   assert.equal(response.status(),200,path);
+   assert.match(response.headers()['content-type'],/^image\//);
+   assert((await response.body()).length>0);
+  }
+  const origin=new URL(preview).origin;
+  for(const url of new Set([origin+'/api/health',preview+'/api/health',preview+'/files/unexported/materials/secret.mp4'])){
+   const response=await page.request.get(url,{headers:{Accept:'application/json'}});
+   assert.equal(response.status(),404,url);
+  }
+  console.log('PASS actual preview HTTP: exported slides/thumbs/SVG return 200; API and unexported files return 404');
+  await page.goto(preview+'/');
+  await page.getByRole('heading',{name:'我的課程',exact:true}).waitFor();
+  await noEditing();
+  await page.goto(preview+'/c/fixture');
+  await page.getByRole('heading',{name:'靜態驗證課程',exact:true}).waitFor();
+  await noEditing();
+  assert.equal(await page.locator('a[href*="/d/hidden/"]').count(),0);
+  await page.goto(preview+'/c/fixture/d/deck/1');
+  await page.locator(NOTES+' .mermaid-block svg').first().waitFor();
+  await page.locator(NOTES+' mark').waitFor();
+  await page.getByText('重點',{exact:true}).waitFor();
+  assert.equal(await page.locator(NOTES+' button.timestamp').count(),3);
+  assert(await page.locator(NOTES+' img').evaluateAll(imgs=>imgs.length>0&&imgs.every(i=>i.complete&&i.naturalWidth>0)));
+  assert(await page.locator('img').evaluateAll(imgs=>imgs.every(i=>i.complete&&i.naturalWidth>0)));
+  await noEditing();
+  for(const [label,video] of [['中文影片','chinese'],['編碼影片','chinese'],['00:12','ascii']]){
+   await page.getByRole('button',{name:label,exact:true}).first().click();
+   assert.equal(await page.locator('video').getAttribute('src'),`https://example.com/public-videos/${video}.mp4`);
+   await page.getByRole('button',{name:'關閉播放器'}).click();
+  }
+  await page.setViewportSize({width:375,height:812});
+  await page.getByRole('tab',{name:'筆記',exact:true}).first().click();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),375);
+  await noEditing();
+  await page.goto(preview+'/c/text-only/d/deck/1');
+  await page.locator(NOTES+' .prose-note').waitFor();
+  assert.equal(await page.locator('button.timestamp').count(),0);
+  assert((await page.locator(NOTES+' .prose-note').innerText()).includes('00:12'));
+  await page.goto(preview+'/c/fixture/edit');
+  await page.waitForURL(preview+'/');
+  await noEditing();
+  assert.deepEqual(api,[]);assert.deepEqual(errors,[]);assert.deepEqual(failures,[]);
+  console.log('PASS actual static export: course/deck JSON, subpath, images, mermaid/highlight/callout, Unicode video URLs, text timestamps, mobile and read-only routes');
+ } finally {await page.close();}
+}
+async function unicodeVideoLinks(browser, base) {
  const page=await browser.newPage();
  try {
-  await fixture(page,isStatic);
+  await fixture(page);
   const unicodeMarkdown='[中文影片](video:課堂一?t=12) [編碼影片](video:%E8%AA%B2%E5%A0%82%E4%B8%80?t=24) [ASCII影片](video:video-b?t=12) [未知影片](video:不存在?t=12) [拒絕腳本](javascript:alert(1)) [拒絕資料](data:text/html,test)';
   const unicodeCourse={...course,info:{...info,videoUrls:{'課堂一':'https://example.com/public-videos/chinese.mp4','video-b':'https://example.com/public-videos/ascii.mp4'}},videos:[...course.videos,{id:'課堂一',source:'materials/chinese.mp4',title:'中文影片',duration:100}]};
-  if(isStatic){
-   await page.route('**/data/fixture/course.json',route=>json(route,unicodeCourse));
-   await page.route('**/data/fixture/decks/deck.json',route=>json(route,{...deck,notes:{'1':{markdown:unicodeMarkdown,meta}}}));
-  }else{
-   await page.route('**/api/courses/fixture',route=>json(route,unicodeCourse));
-   await page.route('**/api/courses/fixture/decks/deck/notes/1',route=>json(route,{markdown:unicodeMarkdown,meta,review:null}));
-  }
+  await page.route('**/api/courses/fixture',route=>json(route,unicodeCourse));
+  await page.route('**/api/courses/fixture/decks/deck/notes/1',route=>json(route,{markdown:unicodeMarkdown,meta,review:null}));
   await page.route('**/files/fixture/**',route=>route.abort());
   await page.route('https://example.com/public-videos/**',route=>route.abort());
   await page.goto(base+'/c/fixture/d/deck/1');
@@ -88,13 +139,13 @@ async function unicodeVideoLinks(browser, base, isStatic) {
   assert.equal(await page.locator(NOTES+' button.timestamp').count(),3);
   for(const [label,video] of [['中文影片','chinese'],['編碼影片','chinese'],['ASCII影片','ascii']]){
    await page.getByRole('button',{name:label,exact:true}).click();
-   const expected=isStatic?`https://example.com/public-videos/${video}.mp4`:`/files/fixture/materials/${video==='ascii'?'test':video}.mp4`;
+   const expected=`/files/fixture/materials/${video==='ascii'?'test':video}.mp4`;
    assert.equal(await page.locator('video').getAttribute('src'),expected);
    await page.getByRole('button',{name:'關閉播放器'}).click();
   }
   assert.equal(await page.locator('a[href^="javascript:"],a[href^="data:"]').count(),0);
   assert.equal(await page.getByRole('button',{name:'未知影片',exact:true}).count(),0);
-  console.log(`PASS Unicode literal/encoded timestamps and manifest lookup in ${isStatic?'static':'local'} mode`);
+  console.log('PASS Unicode literal/encoded timestamps and manifest lookup in local mode');
  }finally{await page.close();}
 }
 async function mermaidStaysLocal(browser, base) {
@@ -362,25 +413,18 @@ async function run() {
   await page.evaluate(()=>window.sources[0].emit('open',{}));
   await page.getByText('100%',{exact:true}).waitFor();assert(state.jobReads()>=2);assert(await page.evaluate(()=>window.sources[0].closed));
   await context.close();
-  const staticPage=await browser.newPage({viewport:{width:1440,height:1000}});staticPage.on('pageerror',e=>errors.push(e.message));
-  const staticState=await fixture(staticPage,true);
-  await staticPage.goto(preview+'/c/fixture/d/deck/1');
-  await staticPage.locator(NOTES+' button.timestamp').first().waitFor();
-  assert.equal(await staticPage.getByRole('button',{name:'編輯',exact:true}).count(),0);
-  assert.equal(await staticPage.locator('aside[aria-label="AI 助教"],.cm-content').count(),0);
-  assert.equal(staticState.requests.length,0);
-  course.info.videoUrls={};
-  await staticPage.reload();await staticPage.locator(NOTES+' .prose-note').waitFor();
-  assert.equal(await staticPage.locator('button.timestamp').count(),0);
-  assert((await staticPage.locator(NOTES+' .prose-note').innerText()).includes('00:12'));
+  await exportedStatic(browser);
   await mermaidStaysLocal(browser,local);
   await uploadBeforeLeave(browser,local);
   await landscapeOverlays(browser,local);
   await uploadCancelledByLayout(browser,local);
-  await unicodeVideoLinks(browser,local,false);
-  await unicodeVideoLinks(browser,preview,true);
+  await unicodeVideoLinks(browser,local);
+
   assert.deepEqual(errors,[]);
   console.log('PASS: local/static contracts, draft protection, review cards, image paste, real images/video source, region/chat SSE, upload/scan, stable job SSE/reconnect, mobile overflow, URL sanitization');
  } finally {await browser.close();}
 }
-run().catch(error=>{console.error(error);process.exitCode=1;});
+(process.env.WEB_STATIC_ONLY ? (async()=>{
+ const browser=await chromium.launch({headless:true,executablePath:process.env.WEB_BROWSER_PATH});
+ try {await exportedStatic(browser);} finally {await browser.close();}
+})() : run()).catch(error=>{console.error(error);process.exitCode=1;});

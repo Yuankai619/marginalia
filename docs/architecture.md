@@ -235,9 +235,40 @@ dist/data/courses.json
 dist/data/<c>/course.json                 info + decks + videos (no local paths)
 dist/data/<c>/decks/<d>.json              same shape as GET /api/courses/{c}/decks/{d}, plus notes[i].markdown
 dist/data/<c>/transcripts/<v>.json
+dist/data/<c>/alignment.json              visible-deck ranges, no internal video metadata
 dist/files/<c>/generated/decks/<d>/slides/NNN.webp (+ thumbs)
 dist/files/<c>/notes/<d>/assets/*         note images, same URLs as local mode
 ```
+
+The root build rejects resolved source/output overlap before starting Vite (including symlink aliases).
+It then runs Vite in static mode (clearing its own dist) and calls
+`uv run marginalia export --out <absolute-dist>` from `server/`. Export defaults to all courses under
+`MARGINALIA_COURSES`; `MARGINALIA_EXPORT_COURSES` is an optional comma-separated list of course IDs.
+If no course directories exist, or `uv` is missing from `PATH`, build skips export, writes
+`courses.json: []`, and prints a one-line English warning. The frontend build still succeeds; other
+export failures remain fatal. No Python environment is required for this fallback. The standalone CLI is
+`marginalia export [<course> ...] --out <fresh-directory> [--deck <deck> ...]`; existing `data/` or `files/`
+namespaces are rejected so stale exports cannot retain hidden content. It does not write into course sources.
+
+Export uses explicit metadata allowlists, omitting source paths, fingerprints, status/debug records, chats,
+and all review records. Decks listed in `hiddenDecks` or marked `hidden` are excluded, including their alignment
+ranges. Notes embed only body markdown and `meta: {status, updatedAt?}`; missing status means `edited`.
+`partial` notes and non-final statuses (e.g. `draft`) are omitted. Only final `transcript.json` segments are
+exported, with `{start,end,text}` fields; partial files are never read. Referenced flat note assets are copied
+and revalidated with the upload image/SVG checks. Input symlinks are refused and output writes use pinned
+parent descriptors. No original materials or media binaries are copied. Authored text is preserved as content.
+`videoUrls` includes only known video IDs with public HTTPS URLs without embedded credentials;
+private/local IPs and local/internal/Tailscale hostnames are rejected. No URL is fetched during export.
+
+`VITE_BASE_PATH` (default `/`, e.g. `/marginalia/`) configures Vite assets, router basename, static JSON,
+and all exported image URLs. JSON keeps the API's `/files/…` paths; the static adapter prefixes the build
+base when loading deck images. Static mutations reject, account/history reads return empty arrays,
+and local-only UI controls are gated by `editable`. Hosts must fall back to `index.html` for reader routes;
+the build includes `404.html` for GitHub Pages. Mermaid, highlights, alerts and image rendering are shared
+with local mode. Static notes carry no review record and hide the internal review tab.
+`vite preview` explicitly sets `preview.proxy: {}` so it never inherits the local dev proxies:
+exported `/files` are served from dist; local API and unexported files stay unavailable through preview,
+even when a local backend is running.
 
 Hosting: serve `.svg` files with `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:`
 (what `/files` sends locally), so an image opened on its own cannot load anything. `index.html` carries its own

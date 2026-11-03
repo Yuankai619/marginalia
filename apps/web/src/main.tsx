@@ -13,7 +13,9 @@ if (!root) throw new Error("找不到應用程式根節點");
 // Apply the saved theme before the first paint so dark mode does not flash.
 document.documentElement.classList.toggle("dark", initialTheme() === "dark");
 
-const router = createBrowserRouter([{ path: "*", element: <App /> }]);
+const router = createBrowserRouter([{ path: "*", element: <App /> }], {
+  basename: import.meta.env.BASE_URL,
+});
 
 createRoot(root).render(
   <StrictMode>

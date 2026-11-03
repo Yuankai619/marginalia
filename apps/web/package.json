@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && VITE_MARGINALIA_MODE=static vite build",
-    "check": "biome check src && tsc -b --pretty false && node --test tests/video.test.mjs tests/notes.test.mjs"
+    "check": "biome check src && tsc -b --pretty false && node --test tests/video.test.mjs tests/notes.test.mjs tests/preview.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "1.6.0",

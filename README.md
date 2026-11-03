@@ -16,7 +16,7 @@ Marginalia turns lecture slides and recordings into study notes, with each expla
 
 The interface, generated notes, and agent replies use Traditional Chinese (Taiwan). This README is in English.
 
-> **Static export limitation:** the local reader, Markdown editor, v2 note rendering, API, jobs, and agent chat are available. `pnpm build` currently builds the static frontend only; automatic course-data export is not implemented yet.
+> `pnpm dev` runs the local workspace; `pnpm build` exports a complete read-only course reader for static hosting.
 
 ## Requirements
 
@@ -186,7 +186,7 @@ A course can exist without `course.json`. To customize it, create `courses/<cour
 | --- | --- |
 | `title` | Course display name; defaults to a title derived from the course directory ID. |
 | `language` | Course language metadata; defaults to `en+zh-TW`. |
-| `hiddenDecks` | Deck IDs to exclude from normal presentation/context where supported; defaults to `[]`. This is not an access-control setting. |
+| `hiddenDecks` | Deck IDs to hide in the local reader/context and omit from static exports; defaults to `[]`. This is not local access control. |
 | `videoUrls` | Video ID → public playback URL for static deployment; defaults to `{}`. Use a URL the browser can play directly. |
 
 ZIPs are unpacked once into `materials/_extracted/<zip-name>/` during scanning; an existing extraction directory is reused. Files need no special arrangement by lecture: visual alignment matches recordings against slides across decks, so recordings and decks do not have to pair one-to-one.
@@ -213,6 +213,7 @@ Every subcommand takes a required `course` directory ID. `-h` / `--help` prints 
 | `align` | `course [--video VIDEOS]` | `uv run marginalia align operating-system --video os20260916` |
 | `transcribe` | `course [--video VIDEOS]` | `uv run marginalia transcribe operating-system --video os20260916` |
 | `process` | `course [--deck DECKS]` | `uv run marginalia process operating-system --deck l1` |
+| `export` | `[course ...] --out DIRECTORY [--deck DECKS]` | `uv run marginalia export operating-system --out /tmp/reader-data` |
 
 - `scan` unpacks ZIPs and updates the materials manifest. Run it before individual processing commands after adding files.
 - `render` converts selected decks to slide images, thumbnails, and extracted text.
@@ -220,7 +221,7 @@ Every subcommand takes a required `course` directory ID. `-h` / `--help` prints 
 - `transcribe` runs local Whisper for selected videos. It can be expensive; unlike `process`, calling this command directly does not skip an already completed transcript.
 - `process` scans, renders missing or invalidated deck outputs, aligns videos, transcribes recordings without a current transcript, and generates notes. With `--deck`, transcription includes recordings matched to those decks, audio-only recordings, and videos whose deck membership is unknown. Other decks must already be rendered to participate in a cross-deck match when only one deck is selected.
 
-There are currently no `generate`, `review`, `export`, or `serve` CLI subcommands, and no CLI `--force`, `--model`, or `--device` options. Note generation/review are also available as backend jobs; do not confuse job kinds with CLI commands.
+There are currently no `generate`, `review`, or `serve` CLI subcommands, and no CLI `--force`, `--model`, or `--device` options. Note generation/review are also available as backend jobs; do not confuse job kinds with CLI commands.
 
 ## Configuration
 
@@ -237,6 +238,8 @@ Set environment variables before starting the backend or a CLI command. Backend 
 | `MARGINALIA_CHAT_MODEL` | `sonnet` | Configured chat model default; the current chat handler separately defaults to `sonnet`, and an explicit request model takes precedence. |
 | `MARGINALIA_GEN_CONCURRENCY` | `4` | Concurrent note-generation/review calls. Use a positive integer; more concurrency can exhaust your allowance sooner. |
 | `MARGINALIA_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated browser origins allowed to make requests that change data. Replaces the default list; restart the server after changing it. |
+| `MARGINALIA_EXPORT_COURSES` | All courses | Comma-separated course IDs to include in the root static build. |
+| `VITE_BASE_PATH` | `/` | Build URL prefix, with a trailing slash (e.g. `/marginalia/`). |
 | `MARGINALIA_API` | `http://127.0.0.1:8765` | Vite development proxy target for `/api` and `/files`; use it when running a separate backend on another port. |
 
 Origins must include the scheme, hostname, and port when needed, with no path, trailing slash, or wildcard. Surrounding whitespace and empty entries are ignored. Same-origin requests and CLI requests without an `Origin` header are always allowed. An empty setting allows only those requests. See the Tailscale example above when accessing the reader from another device.
@@ -253,7 +256,7 @@ Or, from `server/`:
 MARGINALIA_WHISPER_THREADS=6 uv run marginalia transcribe operating-system --video os20260916
 ```
 
-The web adapter uses `VITE_MARGINALIA_MODE`: `static` reads exported JSON, `mock` explicitly enables demo data and simulated agent replies, and the default uses the local API. `pnpm build` sets static mode automatically. Setting static mode alone does not export course data.
+The web adapter uses `VITE_MARGINALIA_MODE`: `static` reads exported JSON, `mock` explicitly enables demo data and simulated agent replies, and the default uses the local API. `pnpm build` sets static mode automatically. The root build command also exports course data after Vite finishes.
 
 ## How notes are generated
 
@@ -350,19 +353,47 @@ The backend supplies context from the current course: visible slides, speaker no
 
 ## Deploying a static reader
 
-The architecture defines this build command from the repository root:
+From the repository root, install the dependencies described above, then build:
 
 ```sh
 pnpm build
+pnpm --filter @marginalia/web exec vite preview --host 127.0.0.1 --port 5178
 ```
 
-The intended output is `apps/web/dist/`, containing a read-only reader plus exported course data. Editing, generation, and agent chat require the local backend and are hidden in static mode.
+`vite preview` serves only the built snapshot; it does not proxy `/api` or `/files` to the local backend. No backend needs to be running, and files outside the export remain unavailable.
 
-**Automatic course-data export is not implemented yet.** The web build selects static mode and compiles frontend assets, but does not export course JSON, slides, or notes. Do not deploy that output expecting a complete course reader until export integration lands.
+`apps/web/dist/` contains the frontend and an exported snapshot of every course under `MARGINALIA_COURSES` (default: `courses/`). If there are no courses or `uv` is not installed/on `PATH`, the build skips export, prints a one-line English warning, and produces a working frontend with an empty course index. Other export errors still fail the build. Editing, uploads, generation, account selection, and agent chat are hidden in the static reader.
 
-The export contract includes slides, thumbnails, notes, course/deck JSON, and transcripts. It excludes original `materials/` files and lecture video binaries. The export contract also includes note assets under `files/<course>/notes/<deck>/assets/`. A host serving SVG assets should send `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:`, matching local file serving. Your course data may therefore become public even though `courses/` is git-ignored. Check teaching-material rights and inspect the build output before deploying it.
+Choose courses or a hosting subpath at build time:
 
-For video playback, set `videoUrls` in `course.json` before export, mapping the manifest's video IDs to directly playable hosted media. Local `/files/...` URLs require the backend and will not work on a static host. Without a public URL, the static reader is intended to show timestamps as text.
+```sh
+MARGINALIA_COURSES=/path/to/courses MARGINALIA_EXPORT_COURSES=operating-system,another-course pnpm build
+VITE_BASE_PATH=/marginalia/ pnpm build
+```
+
+`VITE_BASE_PATH` must be an absolute URL path with a trailing slash. Upload the contents of `apps/web/dist/` to that path. Configure your host to serve `index.html` for reader routes such as `/marginalia/c/operating-system/d/<deck>/7`. A `404.html` copy is included for GitHub Pages deep links. No backend is needed. SVG assets should be served with `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:`; the reader HTML also carries its own CSP.
+
+For a data-only export, run from `server/`:
+
+```sh
+uv run marginalia export operating-system --out /tmp/marginalia-snapshot
+uv run marginalia export operating-system --deck l1-operating-systems-a-recap --out /tmp/marginalia-l1
+```
+
+Omit course IDs to export all courses. The output must have no existing `data/` or `files/` directory; use a new destination for each standalone snapshot. `pnpm build` recreates its own `dist/` before exporting, preventing removed or newly hidden content from surviving a rebuild.
+
+The export includes visible decks, slide images and thumbnails, completed notes with their public status, referenced note images, final transcripts, and alignment ranges. It excludes `hiddenDecks`, unfinished/partial notes and transcripts, review records, chat history, local source paths, original `materials/`, and lecture video binaries. Note images are checked again during export, including SVG validation. Metadata is explicitly allowlisted; lesson text and authored note content remain as written, so inspect the snapshot and teaching-material rights before publishing.
+
+For playback, set `videoUrls` in `course.json`, mapping video IDs to directly playable public HTTPS URLs. Local/private IPs, local hostnames, Tailscale names, and URLs with embedded credentials are excluded. Without an accepted public URL, timestamps appear as text. The exporter never downloads media.
+
+To run the browser regression against actual exported synthetic courses:
+
+```sh
+(cd server && uv run python ../scripts/static-fixture.py /tmp/marginalia-fixture-courses)
+MARGINALIA_COURSES=/tmp/marginalia-fixture-courses pnpm build
+# Start the preview above, then use your existing Playwright installation:
+NODE_PATH=/path/to/playwright/node_modules WEB_STATIC_ONLY=1 WEB_STATIC_URL=http://127.0.0.1:5178 node scripts/web-regression.cjs
+```
 
 ## Skills and coding-agent integration
 
@@ -387,7 +418,7 @@ Once you choose a deck, an agent can run `uv run marginalia process operating-sy
 | Port 8765 or 5173 is occupied | Check existing local dev servers. Stop only a server you started, or reuse it. The launcher starts the backend on 8765; Vite normally starts on 5173 but may report a different available port. For a second checkout, use the separate-port recipe below. |
 | Course or deck does not appear | Confirm `materials/` exists under the courses root, rerun `scan`, inspect `generated/manifest.json`, and check `MARGINALIA_COURSES`. |
 | Alignment points to the wrong page | In local mode, expand the course's **錄影與投影片的對應** (Recording/slide mapping) timeline, click the relevant segment, and enter the correct slide number. Saved manual segments survive reruns. The current editor changes the page within the existing deck; cross-deck correction is supported by the API contract but needs further UI integration. |
-| Static site shows missing courses or broken video links | Confirm the exporter is actually implemented and course data is included. Check `videoUrls`; compiling the frontend alone does not package the courses. |
+| Static site shows missing courses or broken video links | Run the root `pnpm build` and inspect `dist/data/courses.json`. Check `MARGINALIA_COURSES`, `VITE_BASE_PATH`, the host route fallback, and public HTTPS `videoUrls`. |
 
 ## Development
 
