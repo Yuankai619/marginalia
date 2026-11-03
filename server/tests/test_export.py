@@ -177,6 +177,22 @@ def test_existing_output_rejected(course, tmp_path):
         export_courses(out)
 
 
+def test_untaught_notes_are_exported_with_disclosure(public_course, tmp_path):
+    from marginalia.notes.generate import UNTAUGHT_NOTICE
+
+    body = f"{UNTAUGHT_NOTICE}\n\n==依投影片整理的重點==。"
+    write_text(
+        public_course.note_path("deck", 3),
+        f"---\nstatus: generated\nuntaught: true\ninputs: private-fingerprint\nsources: []\n---\n{body}",
+    )
+    out = tmp_path / "untaught-export"
+    export_courses(out)
+    deck = json.loads((out / "data/fixture/decks/deck.json").read_text())
+    assert deck["notes"]["3"]["markdown"].strip() == body
+    assert deck["notes"]["3"]["meta"] == {"status": "generated"}
+    assert deck["slides"][2]["note"]["status"] == "generated"
+
+
 def test_no_courses(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "COURSES_DIR", tmp_path / "missing")
     out = tmp_path / "empty"

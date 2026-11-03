@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from .. import config
@@ -18,7 +19,7 @@ from ..llm import claude, codex
 from ..store import Course, write_json
 from . import notefile, rules
 from .batch import Progress, run_slides, select
-from .generate import STYLE, meta, parse_output
+from .generate import STYLE, UNTAUGHT_RULE, meta, parse_output, untaught_body
 from .generate import SYSTEM as WRITER_SYSTEM
 from .material import NOTE_CHARS, Gatherer, Material, clip, render
 
@@ -65,6 +66,15 @@ REVIEWERS = {
 quote 填逐字稿那一行（含 t=），fix 寫要補什麼、補在哪一段、附上的時間點。""",
 }
 
+UNTAUGHT_REVIEWERS = {
+    "correctness": """你負責正確性審稿。對照投影片圖片、文字與講者備註，檢查事實、圖表與機制是否一致。
+找出捏造的「老師說」、課堂例子或口頭補充，以及任何影片時間點連結；未講解頁不能有這些內容。
+補充必須正確且和投影片內容區分。不要求逐字稿佐證。""",
+    "style": REVIEWERS["style"],
+    "coverage": """你負責涵蓋度審稿。只檢查投影片圖片、文字與講者備註裡對理解本頁有幫助、但筆記漏掉的重點。
+quote 填投影片原文或描述圖中內容，fix 說明要補什麼、補在哪一段。不要要求老師的口述、逐字稿佐證或時間點。""",
+}
+
 REVISE = """## 任務
 
 上面是第 {index} 頁目前的筆記，和審稿人提出的問題。依照寫作規範修訂這份筆記：
@@ -90,13 +100,15 @@ def parse_findings(text: str, reviewer: str) -> list[dict]:
 
 
 def reviewer_prompt(m: Material, body: str, task: str) -> str:
-    return f"{render(m)}\n\n## 要審的筆記（第 {m.index} 頁）\n\n{clip(body, NOTE_CHARS)}\n\n## 你的審稿任務\n\n{task}\n\n{OUTPUT}"
+    context = f"\n\n{UNTAUGHT_RULE}" if m.untaught else ""
+    output = OUTPUT.replace("（涵蓋度審稿填逐字稿那一行，含 t=）", "（涵蓋度審稿填投影片內容）") if m.untaught else OUTPUT
+    return f"{render(m)}\n\n## 要審的筆記（第 {m.index} 頁）\n\n{clip(body, NOTE_CHARS)}\n\n## 你的審稿任務\n\n{task}{context}\n\n{output}"
 
 
 def revise_prompt(m: Material, body: str, findings: list[dict]) -> str:
     return (
         f"{render(m)}\n\n## 目前的筆記\n\n{clip(body, NOTE_CHARS)}\n\n## 審稿意見\n\n{findings_text(findings)}\n\n"
-        f"{REVISE.format(index=m.index)}"
+        f"{REVISE.format(index=m.index)}" + (f"\n\n{UNTAUGHT_RULE}" if m.untaught else "")
     )
 
 
@@ -132,11 +144,13 @@ class Reviewer:
             return await claude.complete(call)
 
     async def _review(self, name: str, m: Material, body: str) -> list[dict]:
-        out = await self._claude(reviewer_prompt(m, body, REVIEWERS[name]), SYSTEM, m, config.REVIEW_MODEL)
+        tasks = UNTAUGHT_REVIEWERS if m.untaught else REVIEWERS
+        out = await self._claude(reviewer_prompt(m, body, tasks[name]), SYSTEM, m, config.REVIEW_MODEL)
         return parse_findings(out, name)
 
     async def _codex(self, m: Material, body: str) -> list[dict]:
-        prompt = f"{SYSTEM}\n\n{reviewer_prompt(m, body, REVIEWERS['correctness'])}"
+        tasks = UNTAUGHT_REVIEWERS if m.untaught else REVIEWERS
+        prompt = f"{SYSTEM}\n\n{reviewer_prompt(m, body, tasks['correctness'])}"
         async with self.sem:
             out = await codex.complete(prompt, codex_home=self.codex_home, images=m.images)
         return parse_findings(out, "codex-correctness")
@@ -164,8 +178,12 @@ class Reviewer:
             status, new = parse_output(reply)
             if not new:
                 break
+            if m.untaught:
+                new = untaught_body(new, skipped=status == "skipped")
             if status == "skipped":
-                return "skipped", new, []
+                if not (m.untaught and rules.check_links(new, m)):
+                    return "skipped", new, []
+                new = untaught_body(new)
             current = new
             todo = blocking(rules.check(current, m))
             if len(current) > NOTE_CHARS:  # another round would only see its head
@@ -199,7 +217,10 @@ class Reviewer:
         if note is None or note[0].get("status") == "skipped":
             return None
         front, body = note
-        m = self.g.get(index)
+        # Review the material the saved note was based on, even if a recording was aligned since generation.
+        m = replace(self.g.get(index), untaught=bool(front.get("untaught")))
+        if m.untaught:
+            m = replace(m, ranges=[], lines=[], inputs=front.get("inputs", m.inputs))
         if len(body) > NOTE_CHARS:  # the models would only see the head; never rewrite what they did not read
             return self._too_long(path, base, m, body)
         findings, errors = await self._findings(m, body)

@@ -11,6 +11,8 @@ from marginalia.store import read_json
 @pytest.fixture
 def written(course, monkeypatch):
     async def writer(call):
+        if "第 3 頁「Backup Slide」" in call.prompt:
+            return "SKIP: 這頁只有標題。"
         return "總之 kernel 管理硬體 [00:30](video:v1?t=30)。"
 
     monkeypatch.setattr(claude, "complete", writer)
@@ -302,3 +304,51 @@ def test_normalize_links():
     assert rules.normalize_links("[x](video:v1?t=nan)") == "[x](video:v1?t=nan)"
     assert rules.normalize_links("[0:00](video:v1?t=3725.4)") == "[1:02:05](video:v1?t=3725)"
     assert rules.normalize_links("[a](video:v1?t=x)") == "[a](video:v1?t=x)"
+
+
+def test_untaught_review_uses_slides_and_preserves_marker(course, monkeypatch, tmp_path):
+    front = {"status": "generated", "untaught": True, "inputs": "original-inputs", "sources": []}
+    path = course.note_path("d1", 3)
+    notefile.write(path, front, "老師說 kernel 管理硬體 [00:30](video:v1?t=30)。")
+    seen = []
+
+    async def fake(call):
+        seen.append(call)
+        assert generate.UNTAUGHT_RULE in call.prompt
+        assert "quote 填逐字稿" not in call.prompt
+        if "## 審稿意見" in call.prompt:
+            return "> [!IMPORTANT]\n> ==kernel 管理硬體==。 [00:30](video:v1?t=30)"
+        return '{"findings": []}'
+
+    async def fake_codex(prompt, **kwargs):
+        assert review.UNTAUGHT_REVIEWERS["correctness"] in prompt
+        return '{"findings": []}'
+
+    monkeypatch.setattr(claude, "complete", fake)
+    monkeypatch.setattr(codex, "available", lambda home: True)
+    monkeypatch.setattr(codex, "complete", fake_codex)
+    assert review.review_deck(course, "d1", codex_home=tmp_path)["reviewed"] == [3]
+    assert len(seen) == 4
+    for task in review.UNTAUGHT_REVIEWERS.values():
+        assert any(task in call.prompt for call in seen)
+    new_front, body = notefile.read(path)
+    assert new_front["status"] == "reviewed" and new_front["untaught"] is True
+    assert new_front["inputs"] == "original-inputs" and new_front["sources"] == []
+    assert body.startswith(generate.UNTAUGHT_NOTICE) and "video:" not in body
+    record = read_json(course.review_path("d1", 3))
+    assert any(f["problem"] == "課堂未講解頁不能有影片時間點連結。" for f in record["findings"])
+    assert record["unresolved"] == []
+
+
+def test_untaught_review_after_alignment_does_not_consume_new_transcript(course, monkeypatch):
+    notefile.write(course.note_path("d1", 2), {"status": "generated", "untaught": True, "inputs": "old"}, generate.UNTAUGHT_NOTICE)
+
+    async def fake(call):
+        assert generate.UNTAUGHT_RULE in call.prompt
+        assert "a system call is like a door" not in call.prompt
+        return '{"findings": []}'
+
+    monkeypatch.setattr(claude, "complete", fake)
+    review.review_deck(course, "d1", slides=[2])
+    front, _ = notefile.read(course.note_path("d1", 2))
+    assert front["untaught"] is True and front["inputs"] == "old" and front["sources"] == []

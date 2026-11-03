@@ -44,15 +44,22 @@ def test_partial_transcript_is_flagged(course):
     assert m.partial and "還在轉錄中" in render(m)
 
 
-def test_generate_writes_notes_and_skips_unshown_slide(course, calls):
+def test_generate_writes_notes_for_unshown_slide(course, calls):
     out = generate.generate_deck(course, "d1")
-    assert out == {"generated": [1, 2], "skipped": [3], "kept": []}
-    assert len(calls) == 2  # slide 3 was never on screen: no model call
+    assert out == {"generated": [1, 2, 3], "skipped": [], "kept": []}
+    assert len(calls) == 3
 
     meta, body = notefile.read(course.note_path("d1", 2))
     assert meta["status"] == "generated" and meta["title"] == "System Calls" and meta["sources"] == ["v1@60-120"]
     assert body == "system call 是進入 kernel 的門 [01:04](video:v1?t=64)。"  # fence + H1 stripped, label fixed
-    assert notefile.read(course.note_path("d1", 3))[0]["status"] == "skipped"
+    front, body = notefile.read(course.note_path("d1", 3))
+    assert front["status"] == "generated" and front["untaught"] is True
+    assert front["inputs"] == Gatherer(course, "d1").get(3).inputs
+    assert front["sources"] == [] and "partial" not in front
+    assert body.startswith(generate.UNTAUGHT_NOTICE) and "video:" not in body
+    assert generate.NO_LINKS_RULE in calls[2].prompt
+    assert "只有真的空白頁或純標題頁" in calls[2].prompt
+    assert "不要捏造「老師說」" in calls[2].prompt
 
 
 def test_resume_only_fills_missing_and_edited_is_kept(course, calls):
@@ -304,6 +311,57 @@ def test_realigning_with_new_content_regenerates_partial_notes(course, calls, mo
     pipeline.process(course, ["d1"])
     calls.clear()
     pipeline.process(course, ["d1"])
-    assert len(calls) == 1  # slide 1 now has its own transcript; 2 and 3 are final skips, no model call
+    assert len(calls) == 3  # all were partial; 2 and 3 now become final untaught notes
     assert "partial" not in notefile.read(course.note_path("d1", 1))[0]
-    assert notefile.read(course.note_path("d1", 2))[0]["status"] == "skipped"
+    assert notefile.read(course.note_path("d1", 2))[0]["untaught"] is True
+
+
+@pytest.mark.parametrize("status", ["generated", "reviewed", "skipped", "edited", None])
+def test_untaught_resume_when_video_arrives(course, calls, status):
+    from marginalia.store import write_json
+
+    generate.generate_deck(course, "d1", slides=[3])
+    path = course.note_path("d1", 3)
+    front, body = notefile.read(path)
+    if status is None:
+        front.pop("status")
+    else:
+        front["status"] = status
+    notefile.write(path, front, body)
+    assert generate.generate_deck(course, "d1", slides=[1, 2])["generated"] == [1, 2]
+    calls.clear()
+    assert generate.generate_deck(course, "d1")["generated"] == [] and not calls
+    alignment = course.alignment()
+    alignment["segments"].append({"video": "v1", "start": 200, "end": 220, "deck": "d1", "slide": 3})
+    write_json(course.gen / "alignment.json", alignment)
+    result = generate.generate_deck(course, "d1")
+    if status in ("edited", None):
+        assert not calls and result["generated"] == []
+        assert notefile.read(path) == (front, body)
+    else:
+        assert len(calls) == 1 and result["generated"] == [3]
+        new_front, new_body = notefile.read(path)
+        assert "untaught" not in new_front and "inputs" not in new_front
+        assert new_front["sources"] == ["v1@200-220"]
+        assert "video:" in new_body and generate.UNTAUGHT_NOTICE not in new_body
+        assert generate.LINKS_RULE in calls[0].prompt
+
+
+def test_legacy_not_shown_is_migrated_but_model_skip_is_kept(course, calls):
+    notefile.write(course.note_path("d1", 3), {"status": "skipped", "sources": []}, generate.NOT_SHOWN)
+    notefile.write(course.note_path("d1", 1), {"status": "skipped"}, "只有標題")
+    assert generate.generate_deck(course, "d1")["generated"] == [2, 3]
+    assert notefile.read(course.note_path("d1", 3))[0]["untaught"] is True
+    calls.clear()
+    assert generate.generate_deck(course, "d1")["generated"] == [] and not calls
+
+
+def test_untaught_blank_slide_can_still_skip(course, monkeypatch):
+    async def blank(call):
+        return "SKIP: 這頁只有標題。"
+
+    monkeypatch.setattr(claude, "complete", blank)
+    assert generate.generate_deck(course, "d1", slides=[3])["skipped"] == [3]
+    front, body = notefile.read(course.note_path("d1", 3))
+    assert front["untaught"] is True and front["inputs"]
+    assert body == "這頁只有標題。"

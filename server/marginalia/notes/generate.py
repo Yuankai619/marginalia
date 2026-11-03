@@ -14,10 +14,11 @@ from pathlib import Path
 
 from .. import config
 from ..llm import claude
-from ..store import Course
+from ..store import Course, write_json
 from . import notefile, rules
 from .batch import Progress, run_slides, select
 from .material import Gatherer, Material, render
+from .video_links import strip_video_links
 
 STYLE = (Path(__file__).parent / "style.md").read_text("utf-8")
 SYSTEM = f"""你是幫作業系統課寫講義的助教。你要把一頁投影片和老師上課講的內容，整理成一份給沒有基礎的學生讀的筆記。
@@ -33,12 +34,17 @@ TASK = """## 任務
 - 只輸出筆記的 markdown 本文：不要 frontmatter、不要把整份筆記用 ``` 包起來、不要寫頁標題（# 標題）、不要任何前言或說明。
 - 第一個區塊是 `> [!IMPORTANT]` 結論；流程、架構、狀態轉換、層次關係配 mermaid 圖（節點文字加雙引號）；重點用 ==highlight==。
 - {links}
-- 如果逐字稿顯示老師沒有講這頁（只是翻過去，或這段時間在講別的東西），只輸出一行：`SKIP: <一句說明>`。"""
+- {skip}"""
 
 LINKS_RULE = "時間點連結寫成 [mm:ss](video:<影片 id>?t=<秒數>)，秒數取逐字稿裡講到那件事的那一行開頭的 t 值。"
 NO_LINKS_RULE = "這頁沒有逐字稿，所以不要附任何時間點連結；正文只依投影片與講者備註寫，寫不出來的不要猜。"
 NOT_SHOWN = "對齊結果裡這頁沒有出現在影片上，老師沒有講解這頁。"
 NOT_TAUGHT = "老師在課堂上沒有講解這頁。"
+UNTAUGHT_NOTICE = "> [!IMPORTANT]\n> 本頁課堂未講解，以下根據投影片整理。"
+UNTAUGHT_RULE = f"""本頁課堂未講解，只依投影片圖片、文字與講者備註整理；前後頁標題和大綱只供脈絡參考。
+不要捏造「老師說」、課堂例子或口頭補充；不要要求逐字稿佐證。
+只有真的空白頁或純標題頁可以略過，其餘頁都要保留筆記。
+第一個提示框必須是：\n{UNTAUGHT_NOTICE}\n\n接著寫這頁的結論與筆記。{NO_LINKS_RULE}"""
 SKIP = re.compile(r"\A\s*SKIP\s*[:：]\s*(.*)", re.DOTALL)
 FENCE = re.compile(r"\A(`{3,})(?:markdown|md)?[ \t]*\n(.*?)\n\1[ \t]*\Z", re.DOTALL)
 
@@ -62,11 +68,23 @@ def parse_output(text: str) -> tuple[str, str]:
 
 
 def prompt(m: Material) -> str:
-    return f"{render(m)}\n\n{TASK.format(index=m.index, links=LINKS_RULE if m.lines else NO_LINKS_RULE)}"
+    skip = (
+        "只有真的空白頁或純標題頁才可以只輸出一行 `SKIP: <一句說明>`；其餘頁都要寫筆記。"
+        if m.untaught else
+        "如果逐字稿顯示老師沒有講這頁（只是翻過去，或這段時間在講別的東西），只輸出一行：`SKIP: <一句說明>`。"
+    )
+    links = UNTAUGHT_RULE if m.untaught else LINKS_RULE if m.lines else NO_LINKS_RULE
+    return f"{render(m)}\n\n{TASK.format(index=m.index, links=links, skip=skip)}"
+
+
+def untaught_body(body: str, *, skipped: bool = False) -> str:
+    """Keep the disclosure and exclude model-invented video citations, including after revision."""
+    body = strip_video_links(body)
+    return body if skipped or body.startswith(UNTAUGHT_NOTICE) else f"{UNTAUGHT_NOTICE}\n\n{body}"
 
 
 def meta(m: Material, status: str, partial: str | None = None) -> dict:
-    """Frontmatter. `partial` is the inputs fingerprint when the note was written from incomplete material."""
+    """Frontmatter, with inputs for partial and untaught notes so resume can refresh changed material."""
     out = {
         "slide": m.index,
         "title": m.slide.get("title") or f"Slide {m.index}",
@@ -77,38 +95,55 @@ def meta(m: Material, status: str, partial: str | None = None) -> dict:
     if partial:
         out["partial"] = True  # written before transcript/alignment were complete
         out["inputs"] = partial  # the next run rewrites it once this fingerprint changes
+    if m.untaught:
+        out.update(untaught=True, inputs=m.inputs)
     return out
 
 
-async def write_note(course: Course, m: Material, aligned: bool, force: bool = False) -> str:
+async def write_note(course: Course, m: Material, force: bool = False) -> str:
     """Write one slide's note and return its status, or "kept" when the note changed meanwhile and was left alone."""
     path = course.note_path(m.deck["id"], m.index)
     base = notefile.version(path)  # compare-and-swap: only replace the exact version we started from
     current = notefile.read(path)
     if current is not None and not force and notefile.protected(current[0]):
         return "kept"
-    partial = None
-    if aligned and not m.ranges:
-        status, body = "skipped", NOT_SHOWN
-    else:
-        call = claude.Call(prompt=prompt(m), system=SYSTEM, images=m.images, model=config.WRITER_MODEL)
-        status, body = parse_output(await claude.complete(call))
-        if not body:
-            raise RuntimeError(f"第 {m.index} 頁模型沒有回傳內容")
-        partial = m.inputs if m.partial else None
-    return status if notefile.commit(path, meta(m, status, partial), body, base, force) else "kept"
+    call = claude.Call(prompt=prompt(m), system=SYSTEM, images=m.images, model=config.WRITER_MODEL)
+    status, body = parse_output(await claude.complete(call))
+    if not body:
+        raise RuntimeError(f"第 {m.index} 頁模型沒有回傳內容")
+    findings = []
+    if m.untaught:
+        body = untaught_body(body, skipped=status == "skipped")
+        findings = rules.check_links(body, m)
+        if findings:
+            status = "generated"
+            body = untaught_body(body)
+    partial = m.inputs if m.partial else None
+    if not notefile.commit(path, meta(m, status, partial), body, base, force):
+        return "kept"
+    if findings:
+        write_json(course.review_path(m.deck["id"], m.index), {
+            "findings": findings, "unresolved": findings, "reviewedHash": notefile.digest(body),
+            "noteHash": notefile.digest(body), "revised": False, "reviewedAt": notefile.now(),
+        })  # fmt: skip
+    return status
 
 
 def _wanted(g: Gatherer, slides: list[int] | None, force: bool):
-    """Resuming fills missing notes and rewrites partial ones once their own material changed; listed slides are
-    rewritten; the user's notes only with force."""
+    """Resume missing, legacy unshown, and changed partial/untaught notes; protect the user's edits."""
 
     def keep(i: int, front: dict | None) -> bool:
         if front is None or force:
             return True
         if notefile.protected(front):
             return False
-        return slides is not None or (bool(front.get("partial")) and front.get("inputs") != g.get(i).inputs)
+        if slides is not None:
+            return True
+        if front.get("status") == "skipped" and not front.get("inputs"):
+            note = notefile.read(g.course.note_path(g.deck["id"], i))
+            if note and note[1].strip() == NOT_SHOWN:
+                return True
+        return bool(front.get("partial") or front.get("untaught")) and front.get("inputs") != g.get(i).inputs
 
     return keep
 
@@ -126,7 +161,7 @@ async def agenerate_deck(
 
     async def one(i: int) -> str:
         async with sem:
-            return await write_note(course, g.get(i), g.aligned, force)
+            return await write_note(course, g.get(i), force)
 
     progress(0.0, f"產生 {len(todo)} 頁筆記")
     statuses = await run_slides(todo, one, "產生筆記", progress)

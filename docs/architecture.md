@@ -89,6 +89,7 @@ sources:
   - os20260916@846-1062   # video@start-end seconds the slide was on screen
 partial: true            # optional: written while the transcript or alignment was still pending
 inputs: 3f9a1c0b2d4e       # with partial: fingerprint of the ranges and transcript lines this slide used
+untaught: true           # optional: aligned deck, but this slide has no video ranges; also stores inputs
 updatedAt: 2026-11-03T10:00:00+08:00
 ---
 
@@ -110,7 +111,22 @@ flowchart TD
 
 - Status: a note without a `status` (a hand-written file) counts as `edited`. Generation never overwrites `edited`
   notes unless the user forces it, and every generated/reviewed write is a compare-and-swap on the file content.
-- `status: skipped` + one line when the teacher did not talk about the slide.
+- Slides in an aligned deck with no video ranges are written from the slide image, text and speaker notes,
+  with neighbouring titles/outline as context. They keep `status: generated` (then `reviewed`), add
+  `untaught: true` and an `inputs` fingerprint, and start with an IMPORTANT callout:
+  「本頁課堂未講解，以下根據投影片整理。」 They have no video timestamp links or invented classroom claims.
+  Review checks slide consistency and coverage rather than requiring transcript evidence. The reader uses the
+  existing callout renderer; final untaught notes are exported normally, with the disclosure in their body.
+  Before generated/revised writes, video citations are stripped from inline links (including titles), reference
+  links/definitions, autolinks and HTML anchors. A separate conservative check also detects escaped/entity-encoded
+  `video:` schemes; any residue keeps the note `generated` with a blocking review finding. Such unprotected
+  untaught notes are omitted from static export until fixed; edited notes remain authored content.
+- `status: skipped` + one line remains available for blank/title-only untaught slides, or when a transcript
+  shows that the teacher merely flipped past a slide or discussed something else.
+- Resume refreshes unprotected `untaught` notes only when `inputs` changes. Once a slide gains video ranges,
+  it is rewritten as a regular note (timestamps when transcript lines are available), removing `untaught`.
+  Existing skipped notes with the old fixed “not shown” reason are migrated on resume; other model skips
+  stay skipped. Edited/hand-written notes remain protected.
 - A course without recordings (or with audio only), or a deck that no aligned video shows, gets final slide-only
   notes (no `partial`). A partial note is regenerated only when its `inputs` fingerprint changes. It is computed
   from content (this slide's ranges and transcript lines, whether they are complete, which videos are still pending),
