@@ -13,6 +13,8 @@ from urllib.parse import unquote, urlsplit
 import yaml
 
 from . import config, note_assets
+from .exam.schema import clean_question
+from .notes import notefile
 from .notes.video_links import has_video_links
 from .store import (
     Course,
@@ -125,6 +127,73 @@ def _assets(course: Course, deck: str, notes: dict, out: Path) -> None:
         _write(out, f"files/{course.id}/notes/{deck}/assets/{name}", data)
 
 
+def _exam_assets(course: Course, exam_id: str, markdown: str, out: Path) -> None:
+    names = set(re.findall(r"assets/([\w][\w.-]*\.(?:png|jpe?g|webp|svg))", unquote(markdown), re.IGNORECASE))
+    for name in sorted(names):
+        if ".." in name:
+            raise ValueError("圖片路徑不正確")
+        data = _read(course, config.EXAMS, exam_id, "handout", "assets", name)
+        if data is None:
+            continue
+        if len(data) > note_assets.MAX_BYTES:
+            raise ValueError("圖片不能超過 10 MB")
+        note_assets._check_content(note_assets._extension(name), data)
+        _write(out, f"files/{course.id}/exams/{exam_id}/handout/assets/{name}", data)
+
+
+def _section(course: Course, exam_id: str, name: str) -> dict | None:
+    raw = _read(course, config.EXAMS, exam_id, "handout", name)
+    if raw is None:
+        return None
+    meta, body = notefile.parse(raw.decode("utf-8"))
+    status = meta.get("status", "edited")
+    if status not in {"generated", "reviewed", "edited"}:
+        return None
+    public = {"status": status}
+    if meta.get("updatedAt"):
+        public["updatedAt"] = str(meta["updatedAt"])
+    return {"section": int(name[:3]), "title": str(meta.get("title") or f"第 {int(name[:3])} 節"),
+            "markdown": body, "meta": public}  # fmt: skip
+
+
+def _export_exams(course: Course, out: Path, deck_ids: set[str]) -> None:
+    """Handouts and quizzes only: no uploads, attempts, generator scratch or options (architecture.md, Exam prep)."""
+    folder = config.COURSES_DIR.absolute() / course.id / config.EXAMS
+    summaries = []
+    for path in sorted(folder.iterdir()) if folder.is_dir() and not folder.is_symlink() else []:
+        try:
+            exam_id = validate_id(path.name)
+        except ValueError:
+            continue
+        if path.is_symlink():
+            continue
+        info = _json(course, config.EXAMS, exam_id, "exam.json")
+        if not isinstance(info, dict) or info.get("hidden"):
+            continue
+        handout_dir = path / "handout"
+        names = sorted(
+            p.name for p in (handout_dir.iterdir() if handout_dir.is_dir() and not handout_dir.is_symlink() else [])
+            if re.fullmatch(r"\d{3}\.md", p.name) and p.name != "000.md"
+        )  # fmt: skip
+        sections = [s for s in (_section(course, exam_id, n) for n in names) if s]
+        for section in sections:
+            _exam_assets(course, exam_id, section["markdown"], out)
+        quiz = _json(course, config.EXAMS, exam_id, "quiz.json")
+        public_quiz = None
+        if isinstance(quiz, dict) and isinstance(quiz.get("questions"), list):
+            questions = [q for q in (clean_question(q) for q in quiz["questions"]) if q and q["id"]]
+            for q in questions:
+                q.pop("pastRef", None)
+            public_quiz = {"hash": quiz.get("hash"), "questions": questions}
+        scope = info.get("scope") or {}
+        exam = {"id": exam_id, "title": str(info.get("title") or exam_id),
+                "scope": {"decks": [d for d in scope.get("decks") or [] if d in deck_ids]}}  # fmt: skip
+        _write(out, f"data/{course.id}/exams/{exam_id}.json", {"exam": exam, "handout": sections, "quiz": public_quiz})
+        summaries.append({**exam, "updatedAt": info.get("updatedAt"), "sectionCount": len(sections),
+                          "questionCount": len(public_quiz["questions"]) if public_quiz else 0})  # fmt: skip
+    _write(out, f"data/{course.id}/exams.json", [{k: v for k, v in s.items() if k != "scope"} for s in summaries])
+
+
 def _export_course(course: Course, out: Path, only_decks: list[str] | None) -> dict:
     if not course.exists():
         raise ValueError("找不到課程")
@@ -228,6 +297,7 @@ def _export_course(course: Course, out: Path, only_decks: list[str] | None) -> d
     _write(
         out, f"data/{course.id}/alignment.json", {"videos": {}, "segments": segments}
     )
+    _export_exams(course, out, deck_ids)
     _write(
         out,
         f"data/{course.id}/course.json",

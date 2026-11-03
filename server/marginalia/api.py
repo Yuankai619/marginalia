@@ -23,6 +23,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import ingest, note_assets
 from .agents import chat
 from .course_access import check_course, confined
+from .exam import routes as exam_routes
+from .exam.store import Exam
 from .jobs import JobRunner, runner
 from .llm.accounts import accounts
 from .store import (
@@ -37,7 +39,8 @@ from .store import (
 )
 
 SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
-_ASSET_UPLOAD = re.compile(r"/api/courses/[^/]+/decks/[^/]+/assets")
+_ASSET_UPLOAD = re.compile(r"/api/courses/[^/]+/(?:decks/[^/]+|exams/[^/]+)/assets")
+_EXAM_UPLOAD = re.compile(r"/api/courses/[^/]+/exams/[^/]+/uploads")
 
 
 def _error(status: int, detail: str) -> HTTPException:
@@ -246,9 +249,17 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
                 return JSONResponse({"detail": "需要 Content-Length"}, status_code=411)
             if size > note_assets.MAX_BYTES + 64 * 1024:
                 return JSONResponse({"detail": "圖片不能超過 10 MB"}, status_code=413)
+        if request.method == "POST" and _EXAM_UPLOAD.fullmatch(request.url.path):
+            try:
+                size = int(request.headers.get("content-length", ""))
+            except ValueError:
+                return JSONResponse({"detail": "需要 Content-Length"}, status_code=411)
+            if size > exam_routes.MAX_REQUEST:
+                return JSONResponse({"detail": "一次上傳不能超過 40 MB"}, status_code=413)
         return await call_next(request)
 
     app.state.jobs = job_runner
+    app.include_router(exam_routes.router(_course))
 
     @app.get("/api/health")
     async def health():
@@ -515,6 +526,20 @@ def create_app(job_runner: JobRunner = runner) -> FastAPI:
     @app.post("/api/courses/{course_id}/jobs")
     async def create_job(course_id: str, body: JobRequest):
         course = _course(course_id)
+        if body.kind == "exam":
+            options = body.options
+            try:
+                exam = Exam(course, options.get("exam"))
+            except ValueError as exc:
+                raise _error(404, "找不到考試") from exc
+            if not exam.exists():
+                raise _error(404, "找不到考試")
+            parts = options.get("parts")
+            if parts is not None and (not isinstance(parts, list) or not parts or set(parts) - {"handout", "quiz"}):
+                raise _error(422, "產生項目不正確")
+            await exam_routes.engine_for(
+                options.get("account") or "claude", options.get("model"), options.get("effort")
+            )
         job = await app.state.jobs.create(
             course,
             body.kind,

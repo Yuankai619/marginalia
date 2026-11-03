@@ -15,6 +15,7 @@ courses/<course>/
     reviews/<deck>/001.json         reviewer agents' findings
   notes/<deck>/001.md               the per-slide notes (the thing the user edits)
   chats/<id>.json                   saved agent conversations
+  exams/<exam>/                     exam prep: exam.json, uploads/, handout/, quiz.json, attempts/ (exam/store.py)
 """
 
 from __future__ import annotations
@@ -168,7 +169,7 @@ class Course:
 
     def path(self, *parts: str) -> Path:
         root = self.dir
-        if parts and parts[0] in {config.MATERIALS, config.GENERATED, config.NOTES, config.CHATS}:
+        if parts and parts[0] in {config.MATERIALS, config.GENERATED, config.NOTES, config.CHATS, config.EXAMS}:
             root = confined_path(root, root / parts[0])
         return confined_path(root, self.dir.joinpath(*parts))
 

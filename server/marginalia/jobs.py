@@ -96,6 +96,7 @@ class JobRunner:
             "transcribe",
             "generate",
             "review",
+            "exam",
         }:
             raise ValueError("不支援的工作種類")
         job: Job = {
@@ -150,6 +151,7 @@ class JobRunner:
             job["steps"][0].update(progress=job["progress"], message=message)
             loop.call_soon_threadsafe(asyncio.create_task, self._publish(job.copy()))
 
+        result = None
         try:
             self._checkpoint(job)
             job.update(state="running", startedAt=_now(), message="執行中")
@@ -171,15 +173,17 @@ class JobRunner:
                         execution.result()
                     raise
             else:
-                await self._execute(job, progress)
+                result = await self._execute(job, progress)
             self._checkpoint(job)
-            job.update(state="done", progress=1.0, message="完成", finishedAt=_now())
-            job["steps"][0].update(state="done", progress=1.0, message="完成")
+            done = result if isinstance(result, str) and result else "完成"
+            job.update(state="done", progress=1.0, message=done, finishedAt=_now())
+            job["steps"][0].update(state="done", progress=1.0, message=done)
         except asyncio.CancelledError:
             job.update(state="cancelled", message="已取消", finishedAt=_now())
             job["steps"][0].update(state="cancelled", message="已取消")
         except Exception as exc:  # noqa: BLE001 - job errors must become persisted state
-            error = str(exc) if "尚未安裝，請先合入 K2" in str(exc) else "工作執行失敗"
+            shown = "尚未安裝，請先合入 K2" in str(exc) or type(exc).__name__ == "ExamError"
+            error = str(exc) if shown else "工作執行失敗"
             job.update(
                 state="failed", error=error, message="執行失敗", finishedAt=_now()
             )
@@ -196,7 +200,8 @@ class JobRunner:
             self._checkpoint(job)
             await self._execute(job, progress)
 
-    async def _execute(self, job: Job, progress: Callable[[float, str], None]) -> None:
+    async def _execute(self, job: Job, progress: Callable[[float, str], None]) -> str | None:
+        """Run the job's work; a returned string becomes the finished job's message."""
         course = Course(job["course"])
         check_course(course)
         self._checkpoint(job)
@@ -204,6 +209,21 @@ class JobRunner:
         kind = job["kind"]
         if kind == "scan":
             await asyncio.to_thread(ingest.scan, course)
+        elif kind == "exam":
+            from .exam import run
+            from .exam.context import Engine
+
+            options = params.get("options") or {}
+
+            def exam_progress(fraction: float, message: str) -> None:
+                self._checkpoint(job)
+                progress(fraction, message)
+
+            engine = Engine(options.get("account") or "claude", options.get("model"), options.get("effort"))
+            return await asyncio.to_thread(
+                run.generate_exam, course, options["exam"], parts=options.get("parts"),
+                force=bool(options.get("force")), engine=engine, progress=exam_progress,
+            )  # fmt: skip
         elif kind == "render":
             decks = params.get("decks") or [d["id"] for d in course.manifest()["decks"]]
             for n, deck in enumerate(decks, 1):

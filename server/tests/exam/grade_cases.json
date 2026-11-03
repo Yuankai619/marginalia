@@ -1,0 +1,241 @@
+{
+  "questions": [
+    {
+      "id": "c1",
+      "type": "choice",
+      "prompt": "單選",
+      "options": [
+        {
+          "id": "A",
+          "text": "a"
+        },
+        {
+          "id": "B",
+          "text": "b"
+        }
+      ],
+      "answer": [
+        "B"
+      ],
+      "multiple": false,
+      "points": 2
+    },
+    {
+      "id": "c2",
+      "type": "choice",
+      "prompt": "多選",
+      "options": [
+        {
+          "id": "A",
+          "text": "a"
+        },
+        {
+          "id": "B",
+          "text": "b"
+        },
+        {
+          "id": "C",
+          "text": "c"
+        }
+      ],
+      "answer": [
+        "A",
+        "C"
+      ],
+      "multiple": true,
+      "points": 3
+    },
+    {
+      "id": "f1",
+      "type": "fill",
+      "prompt": "{{1}} 與 {{2}}",
+      "blanks": [
+        [
+          "SJF",
+          "Shortest Job First"
+        ],
+        [
+          "starvation",
+          "飢餓"
+        ]
+      ],
+      "points": 4
+    },
+    {
+      "id": "f2",
+      "type": "fill",
+      "prompt": "{{1}} {{2}} {{3}}",
+      "blanks": [
+        [
+          "a"
+        ],
+        [
+          "b"
+        ],
+        [
+          "c"
+        ]
+      ],
+      "points": 5
+    },
+    {
+      "id": "s1",
+      "type": "short",
+      "prompt": "簡答",
+      "points": 6
+    },
+    {
+      "id": "f3",
+      "type": "fill",
+      "prompt": "{{1}}{{2}}{{3}}{{4}}",
+      "blanks": [
+        [
+          "a"
+        ],
+        [
+          "b"
+        ],
+        [
+          "c"
+        ],
+        [
+          "d"
+        ]
+      ],
+      "points": 1
+    }
+  ],
+  "cases": [
+    {
+      "question": "c1",
+      "answer": [
+        "B"
+      ],
+      "status": "correct",
+      "score": 2
+    },
+    {
+      "question": "c1",
+      "answer": [
+        "A"
+      ],
+      "status": "incorrect",
+      "score": 0
+    },
+    {
+      "question": "c1",
+      "answer": [],
+      "status": "blank",
+      "score": 0
+    },
+    {
+      "question": "c1",
+      "answer": null,
+      "status": "blank",
+      "score": 0
+    },
+    {
+      "question": "c2",
+      "answer": [
+        "C",
+        "A"
+      ],
+      "status": "correct",
+      "score": 3
+    },
+    {
+      "question": "c2",
+      "answer": [
+        "A"
+      ],
+      "status": "incorrect",
+      "score": 0
+    },
+    {
+      "question": "f1",
+      "answer": [
+        "  sjf ",
+        "飢餓"
+      ],
+      "status": "correct",
+      "score": 4
+    },
+    {
+      "question": "f1",
+      "answer": [
+        "shortest   job first",
+        "x"
+      ],
+      "status": "partial",
+      "score": 2
+    },
+    {
+      "question": "f1",
+      "answer": [
+        "ＳＪＦ",
+        ""
+      ],
+      "status": "partial",
+      "score": 2
+    },
+    {
+      "question": "f1",
+      "answer": [
+        "",
+        ""
+      ],
+      "status": "blank",
+      "score": 0
+    },
+    {
+      "question": "f1",
+      "answer": [
+        "x",
+        "y"
+      ],
+      "status": "incorrect",
+      "score": 0
+    },
+    {
+      "question": "f2",
+      "answer": [
+        "a",
+        "b",
+        "x"
+      ],
+      "status": "partial",
+      "score": 3.5
+    },
+    {
+      "question": "f2",
+      "answer": [
+        "a"
+      ],
+      "status": "partial",
+      "score": 1.5
+    },
+    {
+      "question": "s1",
+      "answer": "我的答案",
+      "status": "pending",
+      "score": null
+    },
+    {
+      "question": "s1",
+      "answer": "   ",
+      "status": "blank",
+      "score": 0
+    },
+    {
+      "question": "f3",
+      "answer": [
+        "a",
+        "x",
+        "x",
+        "x"
+      ],
+      "status": "partial",
+      "score": 0.5
+    }
+  ]
+}
