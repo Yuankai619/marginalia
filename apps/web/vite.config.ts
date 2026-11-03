@@ -33,6 +33,7 @@ const staticCsp: Plugin = {
 };
 
 export default defineConfig({
+  base: process.env.VITE_BASE_PATH || "/",
   plugins: [react(), tailwindcss(), staticCsp],
   resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },
   server: {

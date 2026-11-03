@@ -1,3 +1,4 @@
+import { siteUrl } from "./assets";
 import { readEventStream } from "./events";
 import type {
   Account,
@@ -186,7 +187,14 @@ const staticDecks = new Map<string, Promise<StaticDeck>>();
 const staticDeck = (url: string) => {
   let deck = staticDecks.get(url);
   if (!deck) {
-    deck = call<StaticDeck>(url);
+    deck = call<StaticDeck>(siteUrl(url)).then((value) => ({
+      ...value,
+      slides: value.slides.map((slide) => ({
+        ...slide,
+        image: slide.image ? siteUrl(slide.image) : undefined,
+        thumb: slide.thumb ? siteUrl(slide.thumb) : undefined,
+      })),
+    }));
     staticDecks.set(url, deck);
     deck.catch(() => staticDecks.delete(url));
   }
@@ -197,8 +205,8 @@ const staticAdapter: DataAdapter = {
   ...local,
   editable: false,
   mode: "static",
-  courses: () => call("/data/courses.json"),
-  course: (c) => call(`/data/${pathSegment(c)}/course.json`),
+  courses: () => call(siteUrl("/data/courses.json")),
+  course: (c) => call(siteUrl(`/data/${pathSegment(c)}/course.json`)),
   deck: (c, d) =>
     staticDeck(`/data/${pathSegment(c)}/decks/${pathSegment(d)}.json`),
   note: async (c, d, i) => {
@@ -217,8 +225,8 @@ const staticAdapter: DataAdapter = {
     };
   },
   transcript: (c, v) =>
-    call(`/data/${pathSegment(c)}/transcripts/${pathSegment(v)}.json`),
-  alignment: async () => ({ videos: {}, segments: [] }),
+    call(siteUrl(`/data/${pathSegment(c)}/transcripts/${pathSegment(v)}.json`)),
+  alignment: (c) => call(siteUrl(`/data/${pathSegment(c)}/alignment.json`)),
   createCourse: readOnly,
   saveNote: readOnly,
   updateSegment: readOnly,

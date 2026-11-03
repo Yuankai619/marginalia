@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from . import align, ingest, pipeline, slides, transcribe
 from .store import Course
@@ -22,11 +23,21 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--deck", dest="decks", action="append")
         if name in {"align", "transcribe"}:
             command.add_argument("--video", dest="videos", action="append")
+    export = commands.add_parser("export")
+    export.add_argument("courses", nargs="*")
+    export.add_argument("--out", type=Path, required=True)
+    export.add_argument("--deck", dest="decks", action="append")
     return parser
 
 
 def main() -> None:
     args = _parser().parse_args()
+    if args.command == "export":
+        from .export import export_courses
+
+        count = export_courses(args.out, args.courses, args.decks)
+        print(f"已匯出 {count} 門課程" if count else "找不到課程資料，已建立空白靜態閱讀器")
+        return
     course = Course(args.course)
     if args.command == "scan":
         ingest.scan(course)
