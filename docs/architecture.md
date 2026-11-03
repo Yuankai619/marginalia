@@ -420,9 +420,15 @@ Same conventions as the main API (JSON, `{"detail": "<繁中>"}` errors, Origin 
 | POST | `/api/courses/{c}/exams/{e}/assets` | multipart `file` | `{path:"assets/<name>"}`; note-asset rules |
 | GET | `/api/courses/{c}/exams/{e}/quiz` | | `quiz.json` (answers included: hiding them is the UI's job, as in static mode) |
 | GET | `/api/courses/{c}/exams/{e}/attempts` | | `[{id,submittedAt,score,maxScore}]`, newest first |
-| POST | `/api/courses/{c}/exams/{e}/attempts` | `{answers, startedAt?, durationSec?}` | `attempt`, objective questions graded |
+| POST | `/api/courses/{c}/exams/{e}/attempts` | `{quizHash, answers, startedAt?, durationSec?}` | `attempt`, objective questions graded; 409 when `quizHash` is not the current quiz's |
 | GET | `/api/courses/{c}/exams/{e}/attempts/{a}` | | `attempt` |
 | POST | `/api/courses/{c}/exams/{e}/attempts/{a}/grade` | `{question, answer?, account, model?, effort?}` | `{grading, attempt}`; blocks until the agent replies (≤ 5 min) |
+
+Submitting an attempt carries the `hash` of the quiz the answers were written against. The server reads
+`quiz.json` once (regeneration replaces it atomically) and grades and snapshots only that version: when its hash
+differs (the quiz was regenerated in another tab while answering), it saves nothing and returns 409, and the UI
+offers to load the new questions and start again (answers are not carried over, since ids are reused). A missing
+`quizHash` is a 422. The static reader grades in the browser against the quiz it loaded, so it needs no check.
 
 `upload` = `{name, kind:"image"|"text", size, url}` (`url` is `/files/<c>/exams/<e>/uploads/<name>`).
 `answer` in a grade request defaults to the attempt's answer for that question; only `short`, `essay`, `calc`

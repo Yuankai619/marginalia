@@ -144,6 +144,16 @@ export type DataAdapter = {
   ): Promise<{ id: string }>;
 };
 
+/** A failed API response; `status` lets callers react to e.g. 409 (stale quiz) differently from other errors. */
+export class HttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 const call = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, {
     ...init,
@@ -153,8 +163,9 @@ const call = async <T>(path: string, init?: RequestInit): Promise<T> => {
         : { "Content-Type": "application/json" },
   });
   if (!response.ok)
-    throw new Error(
+    throw new HttpError(
       (await response.json().catch(() => null))?.detail || "讀取資料失敗",
+      response.status,
     );
   return response.json() as Promise<T>;
 };
@@ -321,10 +332,11 @@ const local: DataAdapter = {
   },
   attempts: (c, e) => call(`${examPath(c, e)}/attempts`),
   attempt: (c, e, a) => call(`${examPath(c, e)}/attempts/${pathSegment(a)}`),
-  submitAttempt: (c, e, _quiz, body) =>
+  // The quiz version the answers were written against: the server refuses (409) once it was regenerated.
+  submitAttempt: (c, e, quiz, body) =>
     call(`${examPath(c, e)}/attempts`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, quizHash: quiz.hash }),
     }),
   gradeAnswer: (c, e, a, body) =>
     call(`${examPath(c, e)}/attempts/${pathSegment(a)}/grade`, {

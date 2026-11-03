@@ -419,7 +419,8 @@ async function examFlow(browser, base) {
   await page.getByText('已作答 3 / 3').waitFor();
   await page.getByRole('button',{name:'交卷並對答案'}).click();
   await page.getByText('等待 I/O 時行程不能用 CPU。').waitFor();
-  assert.deepEqual(JSON.parse(requests.find(r=>r.method==='POST'&&r.path.endsWith('/attempts')).body).answers,{q1:['B'],q2:['sjf',''],q3:'要花時間'});
+  const submitted=JSON.parse(requests.find(r=>r.method==='POST'&&r.path.endsWith('/attempts')).body);
+  assert.deepEqual(submitted.answers,{q1:['B'],q2:['sjf',''],q3:'要花時間'});assert.equal(submitted.quizHash,'h1');
   await page.getByRole('button',{name:'請 Agent 批改'}).click();
   await page.getByText('沒說花在哪裡').waitFor();
   await page.getByLabel('改寫答案').fill('要保存與載入 PCB');
@@ -434,6 +435,49 @@ async function examFlow(browser, base) {
   if(process.env.WEB_SCREENSHOTS)await page.screenshot({path:process.env.WEB_SCREENSHOTS+'/exam-quiz-mobile.png'});
   assert.deepEqual(errors,[]);
   console.log('PASS exam prep: handout slide images and editing, mock exam answers, 對答案, repeat agent grading, mobile width');
+ } finally {await context.close();}
+}
+// The quiz is regenerated (another tab) while answering: submitting gets 409 and the page offers a fresh start.
+async function examStaleQuiz(browser, base) {
+ const context=await browser.newContext({viewport:{width:1440,height:1000}});
+ const page=await context.newPage();
+ const errors=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ page.on('dialog',dialog=>dialog.accept());
+ const question=(prompt,answer)=>({id:'q1',type:'choice',origin:'new',prompt,options:[{id:'A',text:'甲'},{id:'B',text:'乙'}],answer:[answer],points:2});
+ let quiz={hash:'h1',questions:[question('舊題目','A')]};
+ const posts=[];
+ await page.route('**/api/**',async route=>{
+  const request=route.request(), path=new URL(request.url()).pathname;
+  if(path==='/api/courses/fixture')return json(route,course);
+  if(path==='/api/courses/fixture/exams/midterm')return json(route,{exam:{id:'midterm',title:'期中考',scope:{decks:[]}},uploads:[],handout:[],quiz:{questionCount:1,hash:quiz.hash}});
+  if(path.endsWith('/quiz'))return json(route,quiz);
+  if(path.endsWith('/midterm/attempts')){
+   if(request.method()==='GET')return json(route,[]);
+   const body=JSON.parse(request.postData());posts.push(body);
+   if(body.quizHash!==quiz.hash)return route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({detail:'題目已重新產生，請重新載入題目後再作答'})});
+   return json(route,{id:'b'.repeat(32),quizHash:quiz.hash,questions:quiz.questions,submittedAt:meta.updatedAt,answers:body.answers,gradings:{},results:{q1:{status:'correct',score:2,maxScore:2}},score:2,maxScore:2});
+  }
+  throw new Error(`Unhandled stale fixture: ${path}`);
+ });
+ try {
+  await page.goto(base+'/c/fixture/exam/midterm/quiz');
+  await page.getByText('舊題目').waitFor();
+  await page.getByLabel(/甲/).check();
+  quiz={hash:'h2',questions:[question('新題目','B')]};
+  await page.getByRole('button',{name:'交卷並對答案'}).click();
+  await page.getByRole('alert').getByText(/重新產生/).waitFor();
+  assert.equal(posts.at(-1).quizHash,'h1');
+  assert.equal(await page.getByText('得分').count(),0); // nothing graded against the new questions
+  await page.getByRole('button',{name:'載入新題目重新開始'}).click();
+  await page.getByText('新題目').waitFor();
+  assert.equal(await page.getByLabel(/甲/).isChecked(),false); // the old answers are not carried over
+  await page.getByLabel(/乙/).check();
+  await page.getByRole('button',{name:'交卷並對答案'}).click();
+  await page.getByText('得分').waitFor();
+  assert.equal(posts.at(-1).quizHash,'h2');
+  assert.deepEqual(errors,[]);
+  console.log('PASS exam prep: a quiz regenerated while answering is refused (409) and restarted on the new questions');
  } finally {await context.close();}
 }
 async function run() {
@@ -552,6 +596,7 @@ async function run() {
   await uploadCancelledByLayout(browser,local);
   await unicodeVideoLinks(browser,local);
   await examFlow(browser,local);
+  await examStaleQuiz(browser,local);
 
   assert.deepEqual(errors,[]);
   console.log('PASS: local/static contracts, draft protection, review cards, image paste, real images/video source, region/chat SSE, upload/scan, stable job SSE/reconnect, mobile overflow, URL sanitization');

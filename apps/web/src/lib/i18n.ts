@@ -105,6 +105,9 @@ const zh = {
   rewrite: "改寫答案",
   history: "作答紀錄",
   quizChanged: "題目已重新產生，這份紀錄只能檢視。",
+  quizOutdated:
+    "這份模擬考在你作答期間重新產生了，題目已經不同，答案無法交卷。請載入新題目重新開始。",
+  reloadQuiz: "載入新題目重新開始",
   slide: (n: number) => `第 ${n} 頁`,
   language: "English",
   backToCourse: "回到課程",
@@ -217,6 +220,9 @@ const en: typeof zh = {
   rewrite: "Rewrite the answer",
   history: "Past attempts",
   quizChanged: "The questions were regenerated; this attempt is view-only.",
+  quizOutdated:
+    "This mock exam was regenerated while you were answering, so your answers no longer match its questions. Load the new questions and start again.",
+  reloadQuiz: "Load the new questions",
   slide: (n) => `slide ${n}`,
   language: "中文",
   backToCourse: "Back to course",

@@ -54,6 +54,13 @@ def make_exam(client, **body) -> dict:
     return response.json()
 
 
+def submit(client, answers, quiz_hash=None):
+    """POST an attempt against the quiz version on disk (or `quiz_hash`)."""
+    if quiz_hash is None:
+        quiz_hash = client.get("/api/courses/demo/exams/midterm/quiz").json()["hash"]
+    return client.post("/api/courses/demo/exams/midterm/attempts", json={"answers": answers, "quizHash": quiz_hash})
+
+
 def with_quiz(course, questions=QUIZ) -> Exam:
     exam = Exam(course, "midterm")
     exam.save_quiz([dict(q) for q in questions])
@@ -142,8 +149,7 @@ def test_handout_sections_edit_and_assets(client, course):
 def test_submit_grades_objective_and_hides_nothing_unknown(client, course):
     make_exam(client)
     with_quiz(course)
-    response = client.post("/api/courses/demo/exams/midterm/attempts",
-                           json={"answers": {"q1": ["B"], "q2": "要保存暫存器", "q9": "x", "__proto__": 1}})  # fmt: skip
+    response = submit(client, {"q1": ["B"], "q2": "要保存暫存器", "q9": "x", "__proto__": 1})
     attempt = response.json()
     assert attempt["results"]["q1"] == {"status": "correct", "score": 2, "maxScore": 2}
     assert attempt["results"]["q2"]["status"] == "pending"
@@ -152,6 +158,20 @@ def test_submit_grades_objective_and_hides_nothing_unknown(client, course):
     assert client.get("/api/courses/demo/exams/midterm/attempts").json()[0]["id"] == attempt["id"]
     assert client.get("/api/courses/demo/exams/midterm/attempts/../exam").status_code == 404
     assert client.get("/api/courses/demo/exams/midterm/attempts/" + "g" * 32).status_code == 404
+
+
+def test_submit_refuses_answers_written_against_another_quiz_version(client, course):
+    make_exam(client)
+    old = with_quiz(course, [{**QUIZ[0], "prompt": "舊題：選 B"}]).quiz()
+    # Another tab regenerates the quiz while this one is answering; the id q1 is reused for a new question.
+    with_quiz(course, [{**QUIZ[0], "prompt": "新題：選 A", "answer": ["A"]}])
+    stale = submit(client, {"q1": ["B"]}, old["hash"])
+    assert stale.status_code == 409 and "重新載入" in stale.json()["detail"]
+    assert client.get("/api/courses/demo/exams/midterm/attempts").json() == []  # nothing graded or saved
+    missing = client.post("/api/courses/demo/exams/midterm/attempts", json={"answers": {"q1": ["B"]}})
+    assert missing.status_code == 422
+    fresh = submit(client, {"q1": ["A"]}).json()
+    assert fresh["questions"][0]["prompt"] == "新題：選 A" and fresh["results"]["q1"]["status"] == "correct"
 
 
 def test_agent_grading_is_repeatable_and_keeps_history(client, course, monkeypatch):
@@ -165,7 +185,7 @@ def test_agent_grading_is_repeatable_and_keeps_history(client, course, monkeypat
         return f'好的：{{"score": {score}, "verdict": "partial", "summary": "缺 PCB", "issues": [{{"quote": "x", "problem": "沒提 PCB", "fix": "補上"}}], "missing": ["保存 PCB"], "extra": 1}}'
 
     monkeypatch.setattr(grade, "call_model", fake)
-    attempt = client.post("/api/courses/demo/exams/midterm/attempts", json={"answers": {"q2": "保存暫存器"}}).json()
+    attempt = submit(client, {"q2": "保存暫存器"}).json()
     url = f"/api/courses/demo/exams/midterm/attempts/{attempt['id']}/grade"
     first = client.post(url, json={"question": "q2", "account": "claude", "model": "sonnet"})
     assert first.status_code == 200, first.text
@@ -196,7 +216,7 @@ def test_agent_grading_failure_hides_details(client, course, monkeypatch):
         raise RuntimeError("token sk-secret")
 
     monkeypatch.setattr(grade, "call_model", broken)
-    attempt = client.post("/api/courses/demo/exams/midterm/attempts", json={"answers": {"q2": "x"}}).json()
+    attempt = submit(client, {"q2": "x"}).json()
     response = client.post(f"/api/courses/demo/exams/midterm/attempts/{attempt['id']}/grade",
                            json={"question": "q2", "account": "claude"})  # fmt: skip
     assert response.status_code == 502 and "sk-secret" not in response.text
@@ -271,7 +291,7 @@ def test_export_publishes_handout_and_quiz_only(client, course, tmp_path):
     client.put("/api/courses/demo/exams/midterm/handout/1", json={"markdown": "見 ![圖](assets/a.png)"})
     asset = client.post("/api/courses/demo/exams/midterm/assets", files={"file": ("a.png", PNG, "image/png")}).json()
     client.put("/api/courses/demo/exams/midterm/handout/2", json={"markdown": f"![x]({asset['path']})"})
-    client.post("/api/courses/demo/exams/midterm/attempts", json={"answers": {}})
+    submit(client, {})
     client.post("/api/courses/demo/exams", json={"title": "隱藏", "id": "hidden"})
     client.put("/api/courses/demo/exams/hidden", json={"hidden": True})
     out = tmp_path / "dist"
