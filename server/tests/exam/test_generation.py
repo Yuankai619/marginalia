@@ -55,6 +55,8 @@ class FakeModel:
         self.calls.append((prompt, system, list(images)))
         if prompt.startswith(MAP_TASK):
             slides = field(prompt, "素材 JSON：")
+            if all(s["text"] == "COVER_ONLY" for s in slides):
+                return "[]"
             return encode([{"title": slides[0]["source"], "explanation": "行程狀態的因果與 PCB 保存機制。",
                             "sources": [s["source"] for s in slides]}])
         if prompt.startswith(REDUCE_TASK):
@@ -311,3 +313,38 @@ def test_hierarchical_merge_keeps_every_source_and_rejects_lost_topics(setup):
     ctx.llm = incomplete
     with pytest.raises(GenerationError, match="每個輸入主題"):
         asyncio.run(study.consolidate(ctx, mapped))
+
+
+
+def test_cover_only_batches_do_not_fail_instructional_decks(setup):
+    exam, _ = setup
+    ctx = context.load(exam)
+    cover = DeckDoc("cover", "封面", [SlideDoc("cover", 1, "封面", "COVER_ONLY", "", "", None)])
+    ctx.decks.append(cover)
+    mapped = asyncio.run(study.topics(ctx, lambda *_: None))
+    assert {r.split("#")[0] for t in mapped for r in t["sources"]} == {"l2", "l3"}
+    ctx._topics = None
+    ctx.decks = [cover]
+    assert asyncio.run(study.topics(ctx, lambda *_: None)) == []
+    with pytest.raises(GenerationError, match="沒有可整理"):
+        asyncio.run(handout.write_handout(ctx, lambda *_: None))
+
+
+def test_long_papers_keep_parent_stem_with_numbered_subquestions():
+    shared = "31. 共同題幹與資料表：" + "t" * 500 + "\n"
+    subquestions = "(1) 子題一：" + "a" * 3100 + "\n(2) 子題二：" + "b" * 3100 + "\n"
+    prefix = "".join(f"{i}. 題目：" + "x" * 1090 + "\n" for i in range(1, 31))
+    pieces = past.text_parts(prefix + shared + subquestions + "32. 最後一題。\n")
+    assert sum((shared + subquestions) in p for p in pieces) == 1
+    ambiguous = prefix + "31. 共同題幹\n1. 子題甲\n2. 子題乙\n" + "x" * 4000
+    with pytest.raises(GenerationError, match="階層不明"):
+        past.text_parts(ambiguous)
+
+
+def test_past_provenance_comes_from_verified_input_slot(setup):
+    exam, _ = setup
+    ctx = context.load(exam)
+    printed = context.PastQuestion("trusted.md", "1", "short", "說明行程狀態。")
+    raw = question("short", printed.prompt, "l2#1", origin="new", pastRef="invented.md")
+    result = quiz.validate(encode([raw]), ctx, [asdict(printed)], past=True)[0]
+    assert result["origin"] == "past" and result["pastRef"] == printed.upload

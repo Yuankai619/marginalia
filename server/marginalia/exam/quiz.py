@@ -21,12 +21,16 @@ def validate(reply: str, ctx: ExamContext, expected: list[dict], *, past: bool) 
         raise ValueError(f"本批必須剛好 {len(expected)} 題，順序相同")
     out = []
     for item, slot in zip(raw, expected, strict=True):
+        if not isinstance(item, dict):
+            raise TypeError("每題必須是 JSON 物件")
+        # Provenance belongs to the source slot, never to a model-generated filename.
+        item = {**item, "origin": "past" if past else "new"}
+        if past:
+            item["pastRef"] = slot["upload"]
         question = clean_question(item, ctx.slide_count())
         if question is None or not question.get("solution") or not question.get("sources"):
             raise ValueError("每題須有有效題型、答案、完整詳解與範圍內投影片來源")
         if past:
-            if question["origin"] != "past" or question.get("pastRef") != slot["upload"]:
-                raise ValueError("考古題 origin/pastRef 必須與來源相符")
             if not question["prompt"].startswith(slot["prompt"]):
                 raise ValueError("考古題題幹必須完整保留原文並放在 prompt 開頭")
             printed_options = [{"id": OPTION_IDS[i], "text": o["text"].strip()}

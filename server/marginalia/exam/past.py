@@ -14,11 +14,15 @@ from .schema import TYPES, json_reply
 
 MAX_PER_UPLOAD = 100
 TEXT_CHARS = 36_000
+_ZH = "一二三四五六七八九十百"
 _QUESTION = re.compile(
     r"^[ \t]{0,3}(?:#{1,6}[ \t]+)?(?:"
-    r"(?:Question|Q)[ \t]*[0-9]{1,3}\b|第[0-9一二三四五六七八九十百]+題|"
-    r"(?:[0-9]{1,3}|[一二三四五六七八九十百]+)[.．、:：)）](?![0-9])|"
-    r"[（(](?:[0-9]{1,3}|[一二三四五六七八九十百]+)[)）])",
+    r"(?:Question|Q)[ \t]*(?P<named_num>[0-9]{1,3})\b|"
+    rf"第(?P<named_zh>[0-9{_ZH}]+)題|"
+    r"(?P<arabic>[0-9]{1,3})[.．、:：)）](?![0-9])|"
+    rf"(?P<chinese>[{_ZH}]+)[.．、:：)）]|"
+    r"[（(](?P<paren_num>[0-9]{1,3})[)）]|"
+    rf"[（(](?P<paren_zh>[{_ZH}]+)[)）])",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -31,9 +35,17 @@ def text_parts(text: str) -> list[str]:
     """
     if len(text) <= TEXT_CHARS:
         return [text]
-    starts = [m.start() for m in _QUESTION.finditer(text)]
-    if not starts:
+    matches = list(_QUESTION.finditer(text))
+    if not matches:
         raise GenerationError("文字考古題太長且沒有可辨識的題號，請依題目分檔或加入題號後重試")
+    # The first numbering family is the parent level. Other families (一、 → 1. → (1)) stay inside it.
+    family = matches[0].lastgroup
+    parents = [m for m in matches if m.lastgroup == family]
+    labels = [m[family] for m in parents]
+    if len(labels) != len(set(labels)) or (all(n.isdecimal() for n in labels)
+                                         and [int(n) for n in labels] != sorted(int(n) for n in labels)):
+        raise GenerationError("長考卷題號階層不明，請依含共同題幹的完整大題分檔後重試")
+    starts = [m.start() for m in parents]
     preamble = text[:starts[0]]
     out, current = [], preamble
     for a, b in pairwise([*starts, len(text)]):

@@ -45,8 +45,8 @@ async def topics(ctx: ExamContext, progress: Progress) -> list[dict]:
 
             def parse(reply):
                 raw = json_reply(reply, list)
-                if not 1 <= len(raw) <= 6:
-                    raise ValueError("每批須有 1–6 個核心主題")
+                if len(raw) > 6:
+                    raise ValueError("每批最多 6 個核心主題；只有封面或行政事項可回空陣列")
                 for item in raw:
                     if not isinstance(item, dict) or not isinstance(item.get("title"), str) or not item["title"].strip():
                         raise ValueError("主題缺少標題")
