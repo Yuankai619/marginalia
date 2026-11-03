@@ -21,7 +21,8 @@ MAX_ANSWER = 20_000
 
 
 def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text)).strip().casefold()
+    # upper().lower() rather than casefold(): exam-grade.ts can do exactly the same (ß → SS → ss).
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text)).strip().upper().lower()
 
 
 def _half(value: float) -> float:
@@ -79,7 +80,7 @@ def new_attempt(quiz: dict, answers: Any, attempt_id: str, started: Any = None, 
     questions = quiz["questions"]
     answers = clean_answers(questions, answers)
     attempt = {
-        "id": attempt_id, "quizHash": quiz.get("hash"), "submittedAt": now(), "answers": answers,
+        "id": attempt_id, "quizHash": quiz.get("hash"), "submittedAt": now(), "questions": questions, "answers": answers,
         "results": {q["id"]: objective(q, answers.get(q["id"])) for q in questions}, "gradings": {},
     }  # fmt: skip
     if isinstance(started, str):

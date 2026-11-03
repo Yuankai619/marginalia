@@ -181,8 +181,10 @@ def test_agent_grading_is_repeatable_and_keeps_history(client, course, monkeypat
     assert client.post(url, json={"question": "q1", "account": "claude"}).status_code == 422
     assert client.post(url, json={"question": "q2", "account": "codex-x"}).status_code == 422
     assert client.post(url, json={"question": "q2", "account": "claude", "model": "gpt"}).status_code == 422
-    with_quiz(course, [*QUIZ, {**QUIZ[0], "id": "q3"}])
-    assert client.post(url, json={"question": "q2", "account": "claude"}).status_code == 409
+    # Regenerating the quiz reuses ids; grading keeps using the questions this attempt answered.
+    with_quiz(course, [{**QUIZ[1], "id": "q2", "type": "choice", "options": QUIZ[0]["options"], "answer": ["A"]}])
+    regraded = client.post(url, json={"question": "q2", "account": "claude"})
+    assert regraded.status_code == 200 and regraded.json()["attempt"]["questions"][1]["type"] == "short"
 
 
 def test_agent_grading_failure_hides_details(client, course, monkeypatch):
@@ -261,7 +263,8 @@ def test_exam_job_validates_exam_and_parts(client):
 
 
 def test_export_publishes_handout_and_quiz_only(client, course, tmp_path):
-    make_exam(client, scope={"decks": ["l2", "secret"]})
+    assert client.post("/api/courses/demo/exams", json={"title": "x", "scope": {"decks": ["secret"]}}).status_code == 422
+    make_exam(client, scope={"decks": ["l2"]})
     exam = with_quiz(course)
     exam.save_text("考古題原文")
     client.put("/api/courses/demo/exams/midterm/handout/1", json={"markdown": "見 ![圖](assets/a.png)"})
@@ -281,3 +284,40 @@ def test_export_publishes_handout_and_quiz_only(client, course, tmp_path):
     files = {p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()}
     assert f"files/demo/exams/midterm/handout/{asset['path']}" in files
     assert not any("uploads" in f or "attempts" in f or "quiz.json" in f or "exam.json" in f for f in files)
+
+
+def test_export_leaves_out_content_from_unpublished_decks(client, course, tmp_path):
+    make_exam(client, scope={"decks": ["l2"]})
+    exam = with_quiz(course, [*QUIZ, {**QUIZ[0], "id": "q3", "sources": [{"deck": "secret", "slide": 1}]}])
+    client.put("/api/courses/demo/exams/midterm/handout/1", json={"markdown": "公開"})
+    client.put("/api/courses/demo/exams/midterm/handout/2", json={"markdown": "隱藏內容"})
+    path = exam.section_path(2)
+    path.write_text(path.read_text().replace("status: edited", "status: edited\nsources: ['secret#1']"))
+    out = tmp_path / "dist"
+    export_courses(out)
+    data = json.loads((out / "data/demo/exams/midterm.json").read_text())
+    assert [s["markdown"] for s in data["handout"]] == ["公開"]
+    assert [q["id"] for q in data["quiz"]["questions"]] == ["q1", "q2"]
+    # Exporting only some decks drops exams whose scope reaches beyond them.
+    course.save_manifest({**course.manifest(), "decks": [*course.manifest()["decks"],
+                          {"id": "l3", "title": "L3", "source": "materials/c.pdf"}]})  # fmt: skip
+    write_json(course.deck_path("l3", "slides.json"), [{"index": 1, "title": "x"}])
+    client.put("/api/courses/demo/exams/midterm", json={"scope": {"decks": ["l2", "l3"]}})
+    partial = tmp_path / "partial"
+    export_courses(partial, decks=["l2"])
+    assert json.loads((partial / "data/demo/exams.json").read_text()) == []
+
+
+def test_restored_past_questions_keep_options_and_shared_intros(course, tmp_path):
+    from marginalia.exam.context import PastQuestion
+
+    exam = Exam(course, "midterm")
+    write_json(exam.path("exam.json"), {"title": "x"})
+    intro = "某系統有三個 process，到達時間與 burst time 如下表。"
+    past = [PastQuestion("p.md", "1a", "short", intro + "畫出 FCFS 甘特圖"),
+            PastQuestion("p.md", "1b", "short", intro + "算出平均等待時間"),
+            PastQuestion("p.md", "2", "choice", "下列敘述何者正確？", [{"id": "A", "text": "TLB 是快取"}])]  # fmt: skip
+    raw = [{"type": "short", "origin": "past", "pastRef": "p.md", "prompt": "（1a）" + intro + "畫出 FCFS 甘特圖"}]
+    questions, _ = run.clean_quiz(exam, raw, past, {"l2": 3})
+    assert [q["prompt"].endswith("平均等待時間") for q in questions] == [False, True, False]
+    assert "TLB 是快取" in questions[2]["prompt"]

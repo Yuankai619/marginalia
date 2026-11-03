@@ -146,7 +146,11 @@ export function QuizView({
       />
     );
 
-  const questions = quiz.questions;
+  // A past attempt shows the questions it answered: regenerated quizzes reuse ids q1, q2, ….
+  const questions = attempt
+    ? (attempt.questions ??
+      (attempt.quizHash === quiz.hash ? quiz.questions : []))
+    : quiz.questions;
   const count = questions.filter((q) => answered(draft.answers[q.id])).length;
   const limit = (detail.exam.options?.minutes ?? 60) * 60;
   const elapsed = (now - Date.parse(draft.startedAt)) / 1000;
@@ -186,7 +190,7 @@ export function QuizView({
   };
 
   const review = attempt !== null;
-  const stale = review && attempt.quizHash !== quiz.hash;
+  const stale = review && attempt.quizHash !== quiz.hash && !attempt.questions;
   const shown =
     review && onlyWrong
       ? questions.filter((q) => attempt.results[q.id]?.status !== "correct")
@@ -388,11 +392,13 @@ function AnswerInput({
   value,
   onChange,
   disabled,
+  source,
 }: {
   question: Question;
   value: Answer | undefined;
   onChange: (value: Answer) => void;
   disabled: boolean;
+  source: ImageSource;
 }) {
   const { t } = useT();
   if (question.type === "choice") {
@@ -436,6 +442,7 @@ function AnswerInput({
               <span className="font-medium">{option.id}.</span>
               <Markdown
                 markdown={option.text}
+                source={source}
                 variant="inline"
                 className="min-w-0 flex-1"
               />
@@ -579,6 +586,7 @@ function QuestionCard({
           value={answer}
           onChange={onAnswer}
           disabled={attempt !== null}
+          source={source}
         />
       </div>
       {attempt && (

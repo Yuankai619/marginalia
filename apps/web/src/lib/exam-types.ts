@@ -51,6 +51,8 @@ export type Grading = {
 export type Attempt = {
   id: string;
   quizHash: string;
+  /** The questions as answered; missing on attempts saved before snapshots existed. */
+  questions?: Question[];
   startedAt?: string;
   submittedAt: string;
   durationSec?: number;

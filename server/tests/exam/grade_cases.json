@@ -103,6 +103,17 @@
         ]
       ],
       "points": 1
+    },
+    {
+      "id": "f4",
+      "type": "fill",
+      "prompt": "{{1}}",
+      "blanks": [
+        [
+          "Straße"
+        ]
+      ],
+      "points": 2
     }
   ],
   "cases": [
@@ -236,6 +247,14 @@
       ],
       "status": "partial",
       "score": 0.5
+    },
+    {
+      "question": "f4",
+      "answer": [
+        "STRASSE"
+      ],
+      "status": "correct",
+      "score": 2
     }
   ]
 }

@@ -141,13 +141,15 @@ def _exam_assets(course: Course, exam_id: str, markdown: str, out: Path) -> None
         _write(out, f"files/{course.id}/exams/{exam_id}/handout/assets/{name}", data)
 
 
-def _section(course: Course, exam_id: str, name: str) -> dict | None:
+def _section(course: Course, exam_id: str, name: str, deck_ids: set[str]) -> dict | None:
     raw = _read(course, config.EXAMS, exam_id, "handout", name)
     if raw is None:
         return None
     meta, body = notefile.parse(raw.decode("utf-8"))
     status = meta.get("status", "edited")
     if status not in {"generated", "reviewed", "edited"}:
+        return None
+    if any(str(src).split("#")[0] not in deck_ids for src in meta.get("sources") or []):
         return None
     public = {"status": status}
     if meta.get("updatedAt"):
@@ -156,7 +158,7 @@ def _section(course: Course, exam_id: str, name: str) -> dict | None:
             "markdown": body, "meta": public}  # fmt: skip
 
 
-def _export_exams(course: Course, out: Path, deck_ids: set[str]) -> None:
+def _export_exams(course: Course, out: Path, deck_ids: set[str], visible: set[str], slides: dict[str, int]) -> None:
     """Handouts and quizzes only: no uploads, attempts, generator scratch or options (architecture.md, Exam prep)."""
     folder = config.COURSES_DIR.absolute() / course.id / config.EXAMS
     summaries = []
@@ -170,22 +172,31 @@ def _export_exams(course: Course, out: Path, deck_ids: set[str]) -> None:
         info = _json(course, config.EXAMS, exam_id, "exam.json")
         if not isinstance(info, dict) or info.get("hidden"):
             continue
+        # The handout and quiz are written from every deck in scope: publish only when all of them are published.
+        scope = info.get("scope") or {}
+        if not set(scope.get("decks") or visible) <= deck_ids:
+            continue
         handout_dir = path / "handout"
         names = sorted(
             p.name for p in (handout_dir.iterdir() if handout_dir.is_dir() and not handout_dir.is_symlink() else [])
             if re.fullmatch(r"\d{3}\.md", p.name) and p.name != "000.md"
         )  # fmt: skip
-        sections = [s for s in (_section(course, exam_id, n) for n in names) if s]
+        sections = [s for s in (_section(course, exam_id, n, deck_ids) for n in names) if s]
         for section in sections:
             _exam_assets(course, exam_id, section["markdown"], out)
         quiz = _json(course, config.EXAMS, exam_id, "quiz.json")
         public_quiz = None
         if isinstance(quiz, dict) and isinstance(quiz.get("questions"), list):
-            questions = [q for q in (clean_question(q) for q in quiz["questions"]) if q and q["id"]]
+            # A question citing an unpublished deck is left out rather than published without its sources.
+            published = [q for q in quiz["questions"] if isinstance(q, dict) and all(
+                isinstance(src, dict) and src.get("deck") in deck_ids for src in q.get("sources") or [])]  # fmt: skip
+            questions = [q for q in (clean_question(q, slides) for q in published) if q and q["id"]]
             for q in questions:
                 q.pop("pastRef", None)
+            text = [q.get(k, "") for q in questions for k in ("prompt", "solution")]
+            text += [o["text"] for q in questions for o in q.get("options", [])]
+            _exam_assets(course, exam_id, "\n".join(text), out)
             public_quiz = {"hash": quiz.get("hash"), "questions": questions}
-        scope = info.get("scope") or {}
         exam = {"id": exam_id, "title": str(info.get("title") or exam_id),
                 "scope": {"decks": [d for d in scope.get("decks") or [] if d in deck_ids]}}  # fmt: skip
         _write(out, f"data/{course.id}/exams/{exam_id}.json", {"exam": exam, "handout": sections, "quiz": public_quiz})
@@ -297,7 +308,8 @@ def _export_course(course: Course, out: Path, only_decks: list[str] | None) -> d
     _write(
         out, f"data/{course.id}/alignment.json", {"videos": {}, "segments": segments}
     )
-    _export_exams(course, out, deck_ids)
+    visible = {d["id"] for d in manifest["decks"] if d["id"] not in hidden and not d.get("hidden")}
+    _export_exams(course, out, deck_ids, visible, {d["id"]: d["slideCount"] for d in public_decks})
     _write(
         out,
         f"data/{course.id}/course.json",

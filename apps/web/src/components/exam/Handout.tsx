@@ -1,5 +1,6 @@
 import { BookOpen, Check, PenLine, Plus } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useBlocker } from "react-router-dom";
 import { toast } from "sonner";
 import { Markdown } from "@/components/Markdown";
 import { NoteEditor, type SlidePick } from "@/components/notes/NoteEditor";
@@ -95,6 +96,13 @@ export function Handout({
   }, [sections]);
 
   const dirty = draft !== null && draft.markdown !== draft.saved;
+  // Switching tabs or leaving the exam is an in-app navigation, which beforeunload does not see.
+  const blocker = useBlocker(dirty || saving);
+  useEffect(() => {
+    if (blocker.state !== "blocked") return;
+    if (window.confirm(t.unsavedLeave)) blocker.proceed();
+    else blocker.reset();
+  }, [blocker, t]);
   useEffect(() => {
     if (!dirty) return;
     const unload = (event: BeforeUnloadEvent) => event.preventDefault();

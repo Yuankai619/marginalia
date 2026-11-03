@@ -46,12 +46,16 @@ PAST_TASK = """## 任務
 
 
 def deck_text(deck: DeckDoc, budget: int) -> str:
-    """A deck's slides as prompt text, notes preferred over raw slide text, kept within `budget` chars."""
+    """A deck's slides as prompt text within `budget` chars: the note (or slide text) and, with the rest of each
+    slide's share, what the teacher said while it was on screen."""
     per = max(400, budget // max(1, len(deck.slides)))
     parts = [f"# 簡報：{deck.title}（id: {deck.id}）"]
     for s in deck.slides:
-        body = s.note or "\n".join(x for x in (s.text, s.speaker_notes) if x)
-        parts.append(f"## 第 {s.index} 頁：{s.title}\n{clip(body.strip(), per) or '（無內容）'}")
+        body = clip((s.note or "\n".join(x for x in (s.text, s.speaker_notes) if x)).strip(), per * 2 // 3)
+        said = " ".join(ln["text"] for ln in s.lines).strip()
+        if said:
+            body += f"\n老師講解（逐字稿，有辨識錯字）：{clip(said, max(200, per - len(body)))}"
+        parts.append(f"## 第 {s.index} 頁：{s.title}\n{body or '（無內容）'}")
     return clip("\n\n".join(parts), budget)
 
 
@@ -63,4 +67,4 @@ def past_text(past: list[PastQuestion]) -> str:
         options = "\n".join(f"  ({o.get('id')}) {o.get('text')}" for o in p.options)
         hint = f"\n  卷面答案：{p.answer_hint}" if p.answer_hint else ""
         rows.append(f"- 來源 {p.upload} 第 {p.number or '?'} 題（{p.type}）：{p.prompt}\n{options}{hint}".rstrip())
-    return "\n".join(rows)
+    return clip("\n".join(rows), 80_000)

@@ -114,7 +114,7 @@ def scope_decks(course: Course, exam: dict) -> list[dict]:
     wanted = exam.get("scope", {}).get("decks") or []
     if not wanted:
         return decks
-    by_id = {d["id"]: d for d in course.manifest()["decks"]}
+    by_id = {d["id"]: d for d in decks}
     return [by_id[d] for d in wanted if d in by_id]
 
 

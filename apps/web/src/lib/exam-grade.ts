@@ -5,8 +5,14 @@ import type { Answer, Question, QuestionResult } from "./exam-types";
 export const OBJECTIVE = new Set(["choice", "fill"]);
 export const SUBJECTIVE = new Set(["short", "essay", "calc"]);
 
+// Upper then lower, as grade.normalize does: folds ß to ss like Python's casefold() would.
 export const normalize = (text: string) =>
-  text.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+  text
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase()
+    .toLowerCase();
 
 // Nearest 0.5, halves up (Python uses floor(x * 2 + 0.5) / 2 for the same result).
 const half = (value: number) => Math.floor(value * 2 + 0.5) / 2;

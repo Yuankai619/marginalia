@@ -7,6 +7,8 @@ from .context import ExamContext, PastQuestion, Progress
 from .prompts import PAST_SYSTEM, PAST_TASK
 from .schema import TYPES, json_reply
 
+MAX_PER_UPLOAD = 100
+
 
 async def parse_uploads(ctx: ExamContext, progress: Progress) -> list[PastQuestion]:
     out: list[PastQuestion] = []
@@ -17,7 +19,7 @@ async def parse_uploads(ctx: ExamContext, progress: Progress) -> list[PastQuesti
         )
         reply = await ctx.llm(f"{material}\n\n{PAST_TASK}", system=PAST_SYSTEM,
                               images=[upload.path] if upload.kind == "image" else [])  # fmt: skip
-        for item in json_reply(reply, list):
+        for item in json_reply(reply, list)[:MAX_PER_UPLOAD]:
             if not isinstance(item, dict) or not isinstance(item.get("prompt"), str) or not item["prompt"].strip():
                 continue
             options = [o for o in item.get("options") or [] if isinstance(o, dict)]

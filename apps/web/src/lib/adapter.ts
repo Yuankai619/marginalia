@@ -460,6 +460,7 @@ const staticAdapter: DataAdapter = {
       ...body,
       id: crypto.randomUUID().replaceAll("-", ""),
       quizHash: quiz.hash,
+      questions: quiz.questions,
       submittedAt: new Date().toISOString(),
       results,
       gradings: {},

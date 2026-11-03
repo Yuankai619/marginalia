@@ -380,7 +380,8 @@ courses/<c>/exams/<exam>/
 - Attempt (`attempts/<id>.json`):
 
   ```json
-  { "id": "…", "quizHash": "…", "startedAt": "…", "submittedAt": "…", "durationSec": 3120,
+  { "id": "…", "quizHash": "…", "questions": [ /* the quiz questions as answered */ ],
+    "startedAt": "…", "submittedAt": "…", "durationSec": 3120,
     "answers": { "q1": ["B"], "q2": ["SJF", "飢餓"], "q3": "我的答案" },
     "results": { "q1": { "status": "correct", "score": 2, "maxScore": 2 },
                  "q3": { "status": "pending", "score": null, "maxScore": 6 } },
@@ -391,11 +392,13 @@ courses/<c>/exams/<exam>/
   ```
 
   Objective grading (`choice`, `fill`) is deterministic: `choice` needs exactly the right set; `fill` scores each
-  blank `points / blanks` (rounded to 0.5) after NFKC, trim, collapsing whitespace and case folding, comparing to any
-  accepted answer. Status `correct` | `partial` | `incorrect` | `blank` (empty answer, 0 points) | `pending`
+  blank `points / blanks` (rounded to the nearest 0.5, halves up) after NFKC, trim, collapsing whitespace and case
+  folding as upper-then-lower (so `ß` matches `SS` in both Python and JS), comparing to any accepted answer. Status `correct` | `partial` | `incorrect` | `blank` (empty answer, 0 points) | `pending`
   (subjective, not yet graded). The latest grading of a subjective question sets its `results` entry; `score`
   sums known scores. Every grading is kept, in order; a grading carries the answer text it graded, so the user can
-  rewrite and grade again without losing earlier versions. The same objective rules are implemented in
+  rewrite and grade again without losing earlier versions. `questions` snapshots the quiz at submission: question ids
+  are reused when a quiz is regenerated, so reviewing and grading an attempt always use its own snapshot (attempts
+  saved without one can be graded only while `quizHash` matches the current quiz; otherwise 409). The same objective rules are implemented in
   `server/marginalia/exam/grade.py` and `apps/web/src/lib/exam-grade.ts` and share test cases.
 
 ### HTTP API (local mode)
@@ -422,7 +425,7 @@ Same conventions as the main API (JSON, `{"detail": "<繁中>"}` errors, Origin 
 
 `upload` = `{name, kind:"image"|"text", size, url}` (`url` is `/files/<c>/exams/<e>/uploads/<name>`).
 `answer` in a grade request defaults to the attempt's answer for that question; only `short`, `essay`, `calc`
-can be agent-graded (422 otherwise). `account`/`model`/`effort` are validated against `GET /api/agents/accounts`
+can be agent-graded (422 otherwise). `scope.decks` may name only visible decks (not `hiddenDecks`/`hidden`). `account`/`model`/`effort` are validated against `GET /api/agents/accounts`
 like chat. Gradings of one attempt are serialized.
 
 Generation is a job: `POST /api/courses/{c}/jobs` with
@@ -497,8 +500,10 @@ async def write_quiz(ctx: ExamContext, past: list[PastQuestion], progress: Progr
 `run.generate_exam(course, exam_id, *, parts, force, account, model, effort, progress)` builds the context, calls
 the three functions, then validates: sections need a title and a non-empty body; questions are checked against
 the quiz schema above (bad ones are dropped with a count in the job message; zero valid questions fails the job);
-every `PastQuestion` must map to a `past` question (missing ones are added as `short` questions with the
-transcribed prompt and no rubric, so past papers are never lost). Before writing, `run.py` strips
+every `PastQuestion` must map to a `past` question of the same upload whose prompt contains its prompt (normalized,
+matched one to one, so sub-questions sharing an introduction count separately); missing ones are added as `short`
+questions with the transcribed prompt, their printed options listed under it, and no rubric, so past papers are never
+lost. At most 100 past questions per upload and 200 questions per quiz are kept. Before writing, `run.py` strips
 `slide:` references to slides outside the course, and asset references that do not exist. The generator never
 writes `handout/`, `quiz.json` or `attempts/` itself, only `work/`. Errors raised by the three functions fail the
 job with the message shown in zh-TW. A first, minimal implementation of all three ships with the API card
@@ -514,7 +519,13 @@ dist/data/<c>/exams/<e>.json                {exam:{id,title,scope:{decks}}, hand
 dist/files/<c>/exams/<e>/handout/assets/*   referenced handout images, revalidated like note assets
 ```
 
-- Exported: exams not `hidden`, sections of any status (missing = edited), questions with `pastRef` removed.
+- Exported: exams not `hidden` whose effective scope (`scope.decks`, or every visible deck when empty) is entirely
+  among the exported decks, so `--deck` or a later `hiddenDecks` change never publishes text written from
+  unpublished slides. Within such an exam, sections whose `sources` or questions whose `sources` cite an unexported
+  deck are left out. Sections of any status (missing = edited) and questions with `pastRef` removed; assets referenced
+  by sections or by quiz prompts, options and solutions.
+- Past-paper questions are exported as transcribed text (only the original upload files are not). Mark the exam
+  `hidden` to keep a privately obtained paper off a public site.
   `slide:` images resolve to the already exported slide images; references to hidden decks render as captions.
 - Not exported: `uploads/`, `work/`, `attempts/`, exam `options`, video scope.
 - In the static reader the quiz is answered in the browser: answers and results live in `localStorage`

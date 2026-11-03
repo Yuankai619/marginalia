@@ -336,7 +336,8 @@ async function examFlow(browser, base) {
  const page=await context.newPage();
  const errors=[], requests=[];
  page.on('pageerror',e=>errors.push(e.message));
- page.on('dialog',dialog=>dialog.accept());
+ let dismissDialog=false, dialogs=0;
+ page.on('dialog',dialog=>{dialogs++;return dismissDialog?dialog.dismiss():dialog.accept();});
  await page.route('**/fixture.svg',r=>r.fulfill({contentType:'image/svg+xml',body:image}));
  await page.route('**/files/fixture/generated/decks/deck/slides/*.webp',r=>r.fulfill({contentType:'image/svg+xml',body:image}));
  const exam={id:'midterm',title:'期中考',scope:{decks:['deck'],videos:[]},options:{minutes:30}};
@@ -393,6 +394,13 @@ async function examFlow(browser, base) {
   // Edit a section with the note editor and save it.
   await page.getByRole('button',{name:'編輯',exact:true}).first().click();
   await page.locator('.cm-content').fill('改寫後的段落 ==重點==');
+  // Switching tabs with an unsaved draft asks first; staying keeps the draft.
+  dismissDialog=true;
+  await page.getByRole('button',{name:'模擬考',exact:true}).click();
+  for(let i=0;i<50&&!dialogs;i++)await page.waitForTimeout(100);
+  await page.waitForFunction(()=>document.querySelector('.cm-content')?.innerText.includes('改寫後的段落'));
+  assert(page.url().endsWith('/handout'));assert.equal(dialogs,1);
+  dismissDialog=false;
   await page.getByRole('button',{name:'完成',exact:true}).click();
   await page.getByText('改寫後的段落').waitFor();
   assert.equal(JSON.parse(requests.find(r=>r.method==='PUT'&&r.path.endsWith('/handout/1')).body).markdown,'改寫後的段落 ==重點==');

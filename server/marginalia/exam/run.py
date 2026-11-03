@@ -19,6 +19,7 @@ from .grade import normalize
 from .store import Exam
 
 PARTS = ("handout", "quiz")
+MAX_QUESTIONS = 200  # a runaway (or injected) model reply must not produce an unusable quiz
 _IMAGE = re.compile(r"!\[([^\]\n]*)\]\(([^)\s]*)\)")
 
 
@@ -27,7 +28,9 @@ class ExamError(RuntimeError):
 
 
 def fix_images(markdown: str, exam: Exam, decks: dict[str, int]) -> str:
-    """Keep `slide:` images of real slides and `assets/` images that exist; the rest become their caption."""
+    """Keep `slide:` images of real slides and `assets/` images that exist; other plain `![…](…)` images become their
+    caption. Titled, reference-style and raw-HTML images are left for the renderer, whose allowlist (imageUrl in
+    apps/web/src/lib/assets.ts) shows them as text."""
 
     def keep(m: re.Match[str]) -> str:
         caption, src = m[1], m[2]
@@ -42,12 +45,15 @@ def fix_images(markdown: str, exam: Exam, decks: dict[str, int]) -> str:
 
 
 def _key(text: str) -> str:
-    return normalize(re.sub(r"[\W_]+", "", text))[:20]
+    return normalize(re.sub(r"[\W_]+", "", text))
 
 
 def _past_question(p: PastQuestion) -> dict:
-    """A past-paper question the quiz writer left out: kept as a short-answer question with no rubric."""
-    return {"type": "short", "origin": "past", "pastRef": p.upload, "prompt": p.prompt, "points": 6,
+    """A past-paper question the quiz writer left out: kept as a short-answer question with no rubric, its printed
+    options listed under the prompt (they often carry the statements being asked about)."""
+    options = "\n".join(f"- ({o.get('id', '')}) {o.get('text', '')}" for o in p.options if o.get("text"))
+    prompt = f"{p.prompt}\n\n{options}" if options else p.prompt
+    return {"type": "short", "origin": "past", "pastRef": p.upload, "prompt": prompt, "points": 6,
             "topic": f"考古題 {p.number}".strip()}  # fmt: skip
 
 
@@ -73,20 +79,25 @@ def write_sections(exam: Exam, sections: list[Section], decks: dict[str, int], f
 
 def clean_quiz(exam: Exam, raw: list[dict], past_questions: list[PastQuestion], decks: dict[str, int]) -> tuple[list[dict], int]:
     """Validated questions (past-paper ones first) and how many were dropped."""
-    questions = [q for q in (schema.clean_question(q, decks) for q in raw) if q]
+    questions = [q for q in (schema.clean_question(q, decks) for q in raw[: MAX_QUESTIONS * 2]) if q]
     dropped = len(raw) - len(questions)
     # The quiz writer must keep every past-paper question; put back any it left out (matched on the prompt's start).
-    covered = {(q.get("pastRef"), _key(q["prompt"])) for q in questions if q["origin"] == "past"}
+    # Each parsed question consumes one quiz question whose prompt contains it (the writer may add a lead-in or
+    # options); counting, not a set, so sub-questions sharing an introduction are matched one by one.
+    unmatched = [(q.get("pastRef"), _key(q["prompt"])) for q in questions if q["origin"] == "past"]
     for p in past_questions:
-        if (p.upload, _key(p.prompt)) not in covered:
+        key = _key(p.prompt)
+        found = next((i for i, (ref, text) in enumerate(unmatched) if ref == p.upload and key and key in text), None)
+        if found is None:
             questions.append(schema.clean_question(_past_question(p), decks))
-            covered.add((p.upload, _key(p.prompt)))
+        else:
+            unmatched.pop(found)
     for q in questions:
         for key in ("prompt", "solution"):
             if q.get(key):
                 q[key] = fix_images(q[key], exam, decks)
     questions.sort(key=lambda q: q["origin"] != "past")  # stable: past papers first, in their order
-    return schema.number(questions), dropped
+    return schema.number(questions[:MAX_QUESTIONS]), dropped
 
 
 async def agenerate(course: Course, exam_id: str, *, parts: list[str] | None = None, force: bool = False,

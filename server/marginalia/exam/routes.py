@@ -87,7 +87,9 @@ def _scope(course: Course, value: Any) -> dict:
     if not isinstance(value, dict):
         raise _error(422, "考試範圍格式不正確")
     manifest = course.manifest()
-    known = {"decks": {d["id"] for d in manifest["decks"]}, "videos": {v["id"] for v in manifest["videos"]}}
+    hidden = set(course.info().get("hiddenDecks") or [])
+    decks = {d["id"] for d in manifest["decks"] if d["id"] not in hidden and not d.get("hidden")}
+    known = {"decks": decks, "videos": {v["id"] for v in manifest["videos"]}}
     out = {}
     for key in ("decks", "videos"):
         items = value.get(key) or []
@@ -164,6 +166,10 @@ def router(course_of: Callable[[str], Course]) -> APIRouter:
     @api.put("/{exam_id}")
     async def update_exam(course_id: str, exam_id: str, body: ExamUpdate):
         exam = exam_of(course_id, exam_id)
+        with exam.locked():
+            return exam.save_info(_updated(exam, body))
+
+    def _updated(exam: Exam, body: ExamUpdate) -> dict:
         info = exam.info()
         if body.title is not None:
             info["title"] = body.title.strip()
@@ -173,7 +179,7 @@ def router(course_of: Callable[[str], Course]) -> APIRouter:
             info["options"] = _options(body.options)
         if body.hidden is not None:
             info["hidden"] = body.hidden
-        return exam.save_info(info)
+        return info
 
     @api.post("/{exam_id}/uploads")
     async def upload(course_id: str, exam_id: str, files: Annotated[list[UploadFile], File()]):
@@ -274,20 +280,24 @@ def router(course_of: Callable[[str], Course]) -> APIRouter:
     @api.post("/{exam_id}/attempts/{attempt_id}/grade")
     async def grade_answer(course_id: str, exam_id: str, attempt_id: str, body: GradeRequest):
         exam = exam_of(course_id, exam_id)
-        attempt_of(exam, attempt_id)
-        quiz = exam.quiz()
-        question = next((q for q in (quiz or {}).get("questions", []) if q["id"] == body.question), None)
+        attempt = attempt_of(exam, attempt_id)
+        # Grade against the questions this attempt answered: the quiz may have been regenerated since.
+        questions = attempt.get("questions") if isinstance(attempt.get("questions"), list) else None
+        if questions is None:
+            quiz = exam.quiz() or {}
+            if attempt.get("quizHash") != quiz.get("hash"):
+                raise _error(409, "題目已重新產生，這份作答紀錄不能再批改")
+            questions = quiz.get("questions", [])
+        question = next((q for q in questions if isinstance(q, dict) and q.get("id") == body.question), None)
         if question is None:
             raise _error(404, "找不到題目")
-        if question["type"] not in SUBJECTIVE:
+        if question.get("type") not in SUBJECTIVE:
             raise _error(422, "只有簡答、問答、計算題可以請 Agent 批改")
         engine = await engine_for(body.account, body.model, body.effort)
         key = f"{exam.dir}/{attempt_id}"
         lock = _grading_locks.setdefault(key, asyncio.Lock())
         async with lock:
             attempt = attempt_of(exam, attempt_id)
-            if attempt.get("quizHash") != quiz.get("hash"):
-                raise _error(409, "題目已重新產生，這份作答紀錄不能再批改")
             answer = body.answer if body.answer is not None else attempt["answers"].get(question["id"], "")
             if not isinstance(answer, str) or not answer.strip():
                 raise _error(422, "答案是空的")
