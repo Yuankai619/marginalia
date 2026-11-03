@@ -4,8 +4,7 @@
 
 Marginalia turns lecture slides and recordings into study notes, with each explanation linked back to the moment the teacher said it.
 
-<!-- Screenshot placeholder: the reader UI screenshot will be added at this path. -->
-![Reader: slides on the left, notes on the right (screenshot pending)](docs/images/reader.png)
+![Reader with synthetic demo content: slides, highlighted notes, Mermaid, and the study assistant](docs/images/reader.png)
 
 - Read slides and editable notes side by side.
 - Click timestamps in notes to jump to the lecture video.
@@ -17,7 +16,7 @@ Marginalia turns lecture slides and recordings into study notes, with each expla
 
 The interface, generated notes, and agent replies use Traditional Chinese (Taiwan). This README is in English.
 
-> **Current limits:** the local pipeline, reader, API, jobs, and agent chat are on `main`. V2 rendering and static course-data export still need integration; the static build currently contains frontend assets only.
+> **Static export limitation:** the local reader, Markdown editor, v2 note rendering, API, jobs, and agent chat are available. `pnpm build` currently builds the static frontend only; automatic course-data export is not implemented yet.
 
 ## Requirements
 
@@ -120,7 +119,7 @@ Run `pnpm` commands from the repository root and `uv run marginalia ...` command
    pnpm dev
    ```
 
-5. Open <http://localhost:5173>, choose the course, click **開始生成** (Generate), and follow the job progress. When processing finishes, open a deck to read its slides and notes.
+5. Open <http://localhost:5173>, choose the course, click **產生筆記** (Generate notes), choose the decks, then click **開始** (Start) and follow the job progress. When processing finishes, open a deck to read its slides and notes.
 
 The course page also supports drag-and-drop uploads and **重新掃描** (Rescan). The folder-and-scan route above works from the CLI too. Processing can start CPU-intensive transcription and consume your Claude subscription allowance.
 
@@ -225,7 +224,7 @@ There are currently no `generate`, `review`, `export`, or `serve` CLI subcommand
 
 ## Configuration
 
-Set environment variables before starting the backend or a CLI command. Backend settings come from [config.py](server/marginalia/config.py) and the Origin setting in [api.py](server/marginalia/api.py):
+Set environment variables before starting the backend or a CLI command. Backend settings come from [config.py](server/marginalia/config.py) and [api.py](server/marginalia/api.py); the Vite proxy setting comes from [vite.config.ts](apps/web/vite.config.ts):
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -238,6 +237,7 @@ Set environment variables before starting the backend or a CLI command. Backend 
 | `MARGINALIA_CHAT_MODEL` | `sonnet` | Configured chat model default; the current chat handler separately defaults to `sonnet`, and an explicit request model takes precedence. |
 | `MARGINALIA_GEN_CONCURRENCY` | `4` | Concurrent note-generation/review calls. Use a positive integer; more concurrency can exhaust your allowance sooner. |
 | `MARGINALIA_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated browser origins allowed to make requests that change data. Replaces the default list; restart the server after changing it. |
+| `MARGINALIA_API` | `http://127.0.0.1:8765` | Vite development proxy target for `/api` and `/files`; use it when running a separate backend on another port. |
 
 Origins must include the scheme, hostname, and port when needed, with no path, trailing slash, or wildcard. Surrounding whitespace and empty entries are ignored. Same-origin requests and CLI requests without an `Origin` header are always allowed. An empty setting allows only those requests. See the Tailscale example above when accessing the reader from another device.
 
@@ -321,19 +321,30 @@ flowchart TD
 
 The timestamp syntax is `[mm:ss](video:<video-id>?t=<seconds>)`, also allowing an hour in the label. When the recording has a playback source, clicking a timestamp opens the corresponding video and seeks to that time. Without a source, the timestamp is shown as text.
 
-Note format v2 adds Mermaid diagrams, `==highlight==`, bold terms, GitHub alerts (`NOTE`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), GFM comparison tables, `$...$` / `$$...$$` math, and images under `notes/<deck-id>/assets/` (`.png`, `.jpg`, `.webp`, `.svg`). Image links use `assets/<filename>`; SVGs are intended to render as images rather than inline SVG. The writer and backend validators now follow v2; the current frontend renderer still needs Mermaid, highlight, alert, and asset-image support. Generated notes use Mermaid rather than referencing nonexistent image files; asset images are supplied by the user. See the [architecture contract](docs/architecture.md) and [note-writing rules](server/marginalia/notes/style.md).
+Note format v2 adds Mermaid diagrams, `==highlight==`, bold terms, GitHub alerts (`NOTE`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), GFM comparison tables, `$...$` / `$$...$$` math, and images under `notes/<deck-id>/assets/` (`.png`, `.jpg`, `.webp`, `.svg`). Image links use `assets/<filename>`; SVGs are intended to render as images rather than inline SVG. The reader and editor preview render these v2 features. Mermaid follows the light/dark theme; click a diagram or image to enlarge it. Invalid Mermaid shows its source and an error message instead of breaking the note. Images must use a plain `assets/<filename>` path with no subfolders; other image URLs render as caption text. Generated notes use Mermaid rather than referencing nonexistent image files; asset images are supplied by the user. See the [architecture contract](docs/architecture.md) and [note-writing rules](server/marginalia/notes/style.md).
+
+### Editing notes
+
+In local mode, click **編輯** (Edit) on a note to open the CodeMirror Markdown editor. Type Markdown directly or use the toolbar for bold text, highlights, headings, lists, callouts, tables, and Mermaid diagrams. Choose **編輯** / **預覽** (Edit / Preview); **並排** (Split) is available when the notes pane is wide enough. The preview uses the same renderer as the reader.
+
+- Save with **儲存** or Ctrl+S (Cmd+S on macOS). Ctrl+B adds bold; Ctrl+Shift+H wraps selected text in `==highlight==` (use Cmd instead of Ctrl on macOS).
+- Paste or drop a PNG/JPG/WebP/SVG, or use **插入圖片** (Insert image). The editor uploads it to the deck's `assets/` folder and inserts its Markdown path. Files must match their type and be at most 10 MB. Wait for uploads to finish before saving; leaving a page offers to save or discard the draft.
+- While editing, keep a recording open and play or scrub it to update **插入目前時間** (Insert current time). The toolbar inserts a link to the player's reported position.
+- **完成** (Done) returns to reading. Unsaved changes trigger a confirmation when you leave; saved notes become `edited` and are protected from generation.
+
+Use the **筆記檢查** (Note checks) tab to read review findings as cards: issues that still need attention, automatically fixed findings, and small suggestions. The tab indicates incomplete checks and hides findings for an outdated note. Automatic review is a separate job; this tab displays its results.
 
 ## The agent panel
 
-The course reader is designed to offer three modes:
+Toggle **投影片**, **筆記**, and **AI 助教** in the top bar to show or hide panes; drag the dividers to resize them. On a narrow screen, switch between panes with the mobile controls. The assistant offers three modes:
 
 | Mode | What to ask |
 | --- | --- |
 | Q&A / 問答 | Explain the current slide, connect concepts across decks, or clarify a selected passage. |
-| Interview / 口試 | Ask one understanding question at a time, wait for your answer, then give feedback and a follow-up. |
-| Review / 審稿 | Check the current note against the slides and transcript, with concrete corrections and timestamps. |
+| Interview / 口試練習 | Ask one understanding question at a time, wait for your answer, then give feedback and a follow-up. |
+| Review / 檢查筆記 | Check the current note against the slides and transcript, with concrete corrections and timestamps. |
 
-Drag across a slide to mark a region, or select text in a note/transcript, then ask about it in the panel. Choose a detected Claude or Codex login, model, and reasoning effort using the account/model controls. The panel sends the current slide and selection to the local backend and streams its response. Explicit mock mode uses simulated replies instead of a model.
+Drag across a slide to mark a region, or select text in a note/transcript and click **問助教** (Ask assistant). The selected context appears in the **AI 助教** panel. Use the model menu in its header to choose a detected Claude or Codex login, model, and reasoning effort. The panel sends the current slide and selection to the local backend and streams its response. Explicit mock mode uses simulated replies instead of a model.
 
 The backend supplies context from the current course: visible slides, speaker notes, per-slide notes, transcripts (including partial transcripts), and your selection. Context is limited to 120,000 characters, prioritizing the current slide; truncation is indicated. Claude's Read/Grep/Glob tools are restricted to this course's validated paths. Codex chat has no file-reading tools and relies on the supplied context. Chat does not edit your notes. Conversations are stored in that course's `chats/` directory, and model requests use the selected provider's service.
 
@@ -347,9 +358,9 @@ pnpm build
 
 The intended output is `apps/web/dist/`, containing a read-only reader plus exported course data. Editing, generation, and agent chat require the local backend and are hidden in static mode.
 
-**Course-data export is not implemented in the branches checked for this draft.** The web build selects static mode and compiles frontend assets, but does not export course JSON, slides, or notes. Do not deploy that output expecting a complete course reader until export integration lands.
+**Automatic course-data export is not implemented yet.** The web build selects static mode and compiles frontend assets, but does not export course JSON, slides, or notes. Do not deploy that output expecting a complete course reader until export integration lands.
 
-The export contract includes slides, thumbnails, notes, course/deck JSON, and transcripts. It excludes original `materials/` files and lecture video binaries. V2 note assets must also be handled by the exporter before publishing illustrated notes. Your course data may therefore become public even though `courses/` is git-ignored. Check teaching-material rights and inspect the build output before deploying it.
+The export contract includes slides, thumbnails, notes, course/deck JSON, and transcripts. It excludes original `materials/` files and lecture video binaries. The export contract also includes note assets under `files/<course>/notes/<deck>/assets/`. A host serving SVG assets should send `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:`, matching local file serving. Your course data may therefore become public even though `courses/` is git-ignored. Check teaching-material rights and inspect the build output before deploying it.
 
 For video playback, set `videoUrls` in `course.json` before export, mapping the manifest's video IDs to directly playable hosted media. Local `/files/...` URLs require the backend and will not work on a static host. Without a public URL, the static reader is intended to show timestamps as text.
 
@@ -373,9 +384,9 @@ Once you choose a deck, an agent can run `uv run marginalia process operating-sy
 | Claude login/model calls fail | Run `claude auth status`, then `claude auth login` if needed. Check subscription allowance and that the selected model is available to your account. |
 | CUDA unavailable / transcription uses CPU | A GPU is optional. With no usable CUDA device, automatic device selection uses CPU; slower processing is expected. If CUDA libraries are detected but incompatible and startup fails, fix the CTranslate2/CUDA installation; the application does not implement its own retry-on-CPU loop. |
 | CPU is saturated | Lower `MARGINALIA_WHISPER_THREADS` before starting a job. Avoid simultaneous transcription runs, including jobs in another checkout. |
-| Port 8765 or 5173 is occupied | Check existing local dev servers. Stop only a server you started, or reuse it. The current launcher/proxy expects backend port 8765; Vite normally starts on 5173 but may report a different available port. |
+| Port 8765 or 5173 is occupied | Check existing local dev servers. Stop only a server you started, or reuse it. The launcher starts the backend on 8765; Vite normally starts on 5173 but may report a different available port. For a second checkout, use the separate-port recipe below. |
 | Course or deck does not appear | Confirm `materials/` exists under the courses root, rerun `scan`, inspect `generated/manifest.json`, and check `MARGINALIA_COURSES`. |
-| Alignment points to the wrong page | In local mode, open the course's **影片對齊** timeline, click the relevant segment, and enter the correct slide number. Saved manual segments survive reruns. The current editor changes the page within the existing deck; cross-deck correction is supported by the API contract but needs further UI integration. |
+| Alignment points to the wrong page | In local mode, expand the course's **錄影與投影片的對應** (Recording/slide mapping) timeline, click the relevant segment, and enter the correct slide number. Saved manual segments survive reruns. The current editor changes the page within the existing deck; cross-deck correction is supported by the API contract but needs further UI integration. |
 | Static site shows missing courses or broken video links | Confirm the exporter is actually implemented and course data is included. Check `videoUrls`; compiling the frontend alone does not package the courses. |
 
 ## Development
@@ -384,6 +395,18 @@ Read [AGENTS.md](AGENTS.md) and the [architecture contract](docs/architecture.md
 
 Start both services with `pnpm dev`. The backend listens on `127.0.0.1:8765`; Vite proxies `/api` and `/files` to it.
 
+If another checkout is already using the default ports, run a separate backend and frontend in two terminals from the repository root:
+
+```sh
+(cd server && MARGINALIA_ALLOWED_ORIGINS=http://localhost:5174,http://127.0.0.1:5174 uv run uvicorn marginalia.api:app --host 127.0.0.1 --port 8766)
+```
+
+```sh
+MARGINALIA_API=http://127.0.0.1:8766 pnpm --filter @marginalia/web dev --host 127.0.0.1 --port 5174
+```
+
+Open <http://127.0.0.1:5174>. Both API and file requests use that checkout's backend.
+
 Run the pre-push checks from the repository root:
 
 ```sh
@@ -391,8 +414,8 @@ pnpm check
 (cd server && uv run ruff check . && uv run pytest -q)
 ```
 
-[CI](.github/workflows/ci.yml) runs on PRs and pushes to `main`: backend dependency sync, Ruff, and pytest; frontend install, check, and build on Node 22 when the web package exists. Backend lint failures fail CI. The frontend check runs Biome, TypeScript, and video-link unit tests. For fixture-based browser regression coverage, see [apps/web/README.md](apps/web/README.md); it uses an existing Playwright installation and does not call models or process real courses.
+[CI](.github/workflows/ci.yml) runs on PRs and pushes to `main`: backend dependency sync, Ruff, and pytest; frontend install, check, and build on Node 22 when the web package exists. Backend lint failures fail CI. The frontend check runs Biome, TypeScript, and unit tests for video links and note formatting/review records. For fixture-based browser regression coverage, see [apps/web/README.md](apps/web/README.md); it uses an existing Playwright installation and does not call models or process real courses.
 
 ## License
 
-[MIT](LICENSE). Copyright (c) 2026 Yuankai619.
+[MIT](LICENSE). Copyright (c) 2026 Yuankai619. See [third-party notices](apps/web/THIRD_PARTY_NOTICES.md) for adapted UI components.
