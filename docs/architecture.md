@@ -434,13 +434,15 @@ SSE are the normal job ones. The job result (in `job.message`) says how many sec
 ```
 exam/
   store.py      Exam: paths, exam.json, uploads, sections, quiz, attempts, locks      (API card)
-  context.py    ExamContext: everything in scope, loaded from disk; llm() wrapper    (API card)
+  context.py    ExamContext and the dataclasses below; llm() wrapper                 (API card)
+  schema.py     quiz question validation, JSON-reply parsing                          (API card)
   grade.py      objective grading, agent grading prompt + parsing                    (API card)
+  routes.py     the HTTP routes above                                                (API card)
   run.py        generate_exam(): the job entry; validates and writes outputs        (API card)
   past.py       parse_uploads()     past papers -> PastQuestion list                (generation card)
   handout.py    write_handout()     scope -> sections                               (generation card)
   quiz.py       write_quiz()        scope + past -> questions                       (generation card)
-  prompts/      prompt text, style rules                                            (generation card)
+  prompts.py    prompt text, style rules (may become a prompts/ folder)              (generation card)
 ```
 
 ```python
