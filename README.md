@@ -360,7 +360,7 @@ pnpm build
 pnpm --filter @marginalia/web exec vite preview --host 127.0.0.1 --port 5178
 ```
 
-`apps/web/dist/` contains the frontend and an exported snapshot of every course under `MARGINALIA_COURSES` (default: `courses/`). An empty course directory produces a working empty reader and a clear build message. Editing, uploads, generation, account selection, and agent chat are hidden in the static reader.
+`apps/web/dist/` contains the frontend and an exported snapshot of every course under `MARGINALIA_COURSES` (default: `courses/`). If there are no courses or `uv` is not installed/on `PATH`, the build skips export, prints a one-line English warning, and produces a working frontend with an empty course index. Other export errors still fail the build. Editing, uploads, generation, account selection, and agent chat are hidden in the static reader.
 
 Choose courses or a hosting subpath at build time:
 

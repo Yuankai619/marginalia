@@ -244,7 +244,9 @@ The root build rejects resolved source/output overlap before starting Vite (incl
 It then runs Vite in static mode (clearing its own dist) and calls
 `uv run marginalia export --out <absolute-dist>` from `server/`. Export defaults to all courses under
 `MARGINALIA_COURSES`; `MARGINALIA_EXPORT_COURSES` is an optional comma-separated list of course IDs.
-No courses is a successful build with `courses.json: []` and an explicit message. The standalone CLI is
+If no course directories exist, or `uv` is missing from `PATH`, build skips export, writes
+`courses.json: []`, and prints a one-line English warning. The frontend build still succeeds; other
+export failures remain fatal. No Python environment is required for this fallback. The standalone CLI is
 `marginalia export [<course> ...] --out <fresh-directory> [--deck <deck> ...]`; existing `data/` or `files/`
 namespaces are rejected so stale exports cannot retain hidden content. It does not write into course sources.
 
