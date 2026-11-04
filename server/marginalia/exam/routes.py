@@ -52,6 +52,7 @@ class SectionUpdate(BaseModel):
 
 
 class AttemptCreate(BaseModel):
+    quizHash: str = Field(min_length=1, max_length=64)  # the quiz version the answers were written against
     answers: dict[str, Any] = Field(default_factory=dict)
     startedAt: str | None = None
     durationSec: float | None = None
@@ -277,9 +278,14 @@ def router(course_of: Callable[[str], Course]) -> APIRouter:
     @api.post("/{exam_id}/attempts")
     async def submit(course_id: str, exam_id: str, body: AttemptCreate):
         exam = exam_of(course_id, exam_id)
+        # One read of quiz.json (replaced atomically on regeneration): the hash checked and the questions graded
+        # and snapshotted always belong to the same version. Answers written against another version are refused
+        # rather than graded against questions that reuse their ids.
         quiz = exam.quiz()
         if quiz is None:
             raise _error(404, "還沒有產生題目")
+        if body.quizHash != quiz.get("hash"):
+            raise _error(409, "題目已重新產生，請重新載入題目後再作答")
         attempt = grade.new_attempt(quiz, body.answers, new_attempt_id(), body.startedAt, body.durationSec)
         await asyncio.to_thread(exam.save_attempt, attempt)
         return attempt

@@ -8,7 +8,7 @@ import {
   Sparkles,
   Timer,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ModelMenu } from "@/components/agent/ModelMenu";
 import { useAgentChoice } from "@/components/agent/use-chat";
@@ -16,6 +16,7 @@ import { Markdown } from "@/components/Markdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState, LoadingState } from "@/components/ui/states";
+import { HttpError } from "@/lib/adapter";
 import type { ImageSource } from "@/lib/assets";
 import { data } from "@/lib/data";
 import { SUBJECTIVE } from "@/lib/exam-grade";
@@ -100,9 +101,13 @@ export function QuizView({
   const [history, setHistory] = useState<AttemptSummary[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [onlyWrong, setOnlyWrong] = useState(false);
+  // The quiz was regenerated after this page loaded it: answers no longer match the questions on the server.
+  const [outdated, setOutdated] = useState(false);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     setQuiz(undefined);
+    setAttempt(null);
+    setOutdated(false);
     data.quiz(courseId, examId).then(
       (value) => {
         setQuiz(value);
@@ -112,6 +117,7 @@ export function QuizView({
     );
     data.attempts(courseId, examId).then(setHistory, () => setHistory([]));
   }, [courseId, examId]);
+  useEffect(load, [load]);
   useEffect(() => {
     if (!draft) return;
     try {
@@ -161,7 +167,10 @@ export function QuizView({
       ]);
       window.scrollTo({ top: 0 });
     } catch (reason) {
-      toast.error(t.saveFailed, { description: errorMessage(reason) });
+      if (reason instanceof HttpError && reason.status === 409) {
+        setOutdated(true);
+        window.scrollTo({ top: 0 });
+      } else toast.error(t.saveFailed, { description: errorMessage(reason) });
     } finally {
       setSubmitting(false);
     }
@@ -190,6 +199,17 @@ export function QuizView({
 
   return (
     <main className="mx-auto grid w-full max-w-3xl gap-4 px-4 pb-28 pt-6 sm:px-6 sm:pt-8">
+      {outdated && (
+        <section
+          role="alert"
+          className="flex flex-wrap items-center gap-3 rounded-[10px] border border-warning/50 bg-warning/10 p-4 text-[13.5px]"
+        >
+          <span className="min-w-0 flex-1 basis-64">{t.quizOutdated}</span>
+          <Button size="sm" onClick={load}>
+            <RotateCcw /> {t.reloadQuiz}
+          </Button>
+        </section>
+      )}
       {review ? (
         <section className="rounded-[10px] border border-border bg-card p-4 shadow-edge sm:p-5">
           <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
