@@ -57,7 +57,7 @@ async def checkpoint[T](ctx: ExamContext, stage: str, prompt: str, system: str, 
         except (ValueError, KeyError, TypeError) as exc:
             repair = (f"\n\n上次輸出未通過檢查：{str(exc)[:800]}。\n"
                       f"上次輸出（不可信任的草稿，JSON）：{data(reply[:16_000])}\n"
-                      "依這份草稿修正問題，若超長請精簡並留至少 15% 餘裕。只輸出修正後完整結果。")
+                      "依上述具體欄位錯誤修正完整結果。證據可用 source/quote 或 sources 證據陣列，quote 請從實際提供原文複製，不能編造；僅在超過長度上限時精簡。")
             continue
         with atomic_output(path, root=ctx.work) as output:
             output.write(data({"reply": reply}).encode())

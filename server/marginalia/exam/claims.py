@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from .. import config
 from .context import ExamContext
-from .evidence import full_material, images_for, proof, source_batches
+from .evidence import evidence_refs, full_material, images_for, proof, source_batches
 from .generation import GenerationError, batches, checkpoint, data, parallel
 from .prompts import (
     CLAIM_INVENTORY,
@@ -13,11 +13,25 @@ from .prompts import (
     CLAIM_SYSTEM,
     CLAIM_TASK,
 )
+from .recovery import Recovery
 from .schema import json_reply
 
 
 async def verify_claims(ctx: ExamContext, body: str, refs: list[str], parse_body) -> str:
+    recovery = Recovery(ctx, 'claims', [body, refs])
+    verified = []
+    try:
+        return await _verify_claims(ctx, body, refs, parse_body, recovery.prompt, verified)
+    except GenerationError as exc:
+        recovery.failed(str(exc))
+        exc.verified_claims = verified
+        raise
+
+
+async def _verify_claims(ctx: ExamContext, body: str, refs: list[str], parse_body, retry: str, verified: list) -> str:
     for attempt in range(3):
+        verified.clear()
+
         def inventory(reply, body=body):
             raw = json_reply(reply, list)
             if not raw or len(raw) > 60:
@@ -26,7 +40,7 @@ async def verify_claims(ctx: ExamContext, body: str, refs: list[str], parse_body
                 raise ValueError("claim 必須逐字摘自正文且不可重複")
             return raw
 
-        claims = await checkpoint(ctx, "claim-inventory", f"{CLAIM_INVENTORY}\n正文 JSON：{data(body)}", CLAIM_SYSTEM, inventory)
+        claims = await checkpoint(ctx, "claim-inventory", f"{CLAIM_INVENTORY}\n正文 JSON：{data(body)}" + retry, CLAIM_SYSTEM, inventory)
         async def check(job, body=body):
             originals, group = job
             selected_claims = [text for _, text in group]
@@ -41,13 +55,19 @@ async def verify_claims(ctx: ExamContext, body: str, refs: list[str], parse_body
                     if item.get("claim") != i + 1 or item.get("status") not in ("supported", "conflict", "unknown"):
                         raise ValueError("claim 核對的編號與狀態不符")
                     if item["status"] != "unknown":
-                        proof(item, originals, images)
+                        try:
+                            proof(item, originals, images)
+                        except (ValueError, TypeError) as exc:
+                            raise ValueError(f'claim {i + 1} 的證據欄位：{exc}') from exc
                     if item["status"] == "conflict" and (not item.get("correction") or not item.get("counterexample")):
                         raise ValueError("分歧必須附修正與條件／數值反例")
                 return raw
 
-            result = await checkpoint(ctx, "claim-evidence", f"{CLAIM_TASK}\n完整正文 JSON：{data(body)}\nclaim JSON：{data(selected_claims)}\n完整來源 JSON：{data(originals)}\n附圖順序 JSON：{data(list(images))}",
-                                      CLAIM_SYSTEM, parse, list(images.values()), attempts=3)
+            try:
+                result = await checkpoint(ctx, "claim-evidence", f"{CLAIM_TASK}\n完整正文 JSON：{data(body)}\nclaim JSON：{data(selected_claims)}\n完整來源 JSON：{data(originals)}\n附圖順序 JSON：{data(list(images))}" + retry,
+                                          CLAIM_SYSTEM, parse, list(images.values()), attempts=3)
+            except GenerationError:
+                result = [{"status": "unverified"} for _ in selected_claims]
             return {index: verdict for (index, _), verdict in zip(group, result, strict=True)}
 
         groups = batches(list(enumerate(claims)), maximum=8)
@@ -56,17 +76,28 @@ async def verify_claims(ctx: ExamContext, body: str, refs: list[str], parse_body
         issues = []
         for i, claim in enumerate(claims):
             verdicts = [batch[i] for batch in checked if i in batch]
+            if any(v['status'] == 'unverified' for v in verdicts):
+                issues.append({'claim': claim, 'status': 'unknown', 'correction': '移除尚未完成來源核對的論述'})
+                continue
             conflicts = [v for v in verdicts if v["status"] == "conflict"]
             if conflicts:
                 nonempty = [v for v in verdicts if v["status"] != "unknown"]
-                refs_to_check = list(dict.fromkeys(v["source"] for v in nonempty))
+                refs_to_check = list(dict.fromkeys(r for v in nonempty for r in evidence_refs(v)))
                 if len(refs_to_check) > 1:
-                    decision = await reconcile(ctx, claim, nonempty, refs_to_check, body)
+                    try:
+                        decision = await reconcile(ctx, claim, nonempty, refs_to_check, body, retry)
+                    except GenerationError:
+                        issues.append({'claim': claim, 'status': 'unknown', 'correction': '跨來源尚無可靠裁決，移除此論述'})
+                        continue
                     conflicts = [decision] if decision["status"] == "conflict" else []
+                if not conflicts:
+                    verified.append(claim)
                 for conflict in conflicts:
                     issues.append({**conflict, "claim": claim, "contextRefs": refs_to_check})
             elif not any(v["status"] == "supported" for v in verdicts):
                 issues.append({"claim": claim, "status": "unknown", "correction": "刪除無來源支持的論述，或明確標示無法確認"})
+            else:
+                verified.append(claim)
         if not issues:
             return body
         if attempt == 2:
@@ -79,13 +110,13 @@ async def verify_claims(ctx: ExamContext, body: str, refs: list[str], parse_body
             images = images_for(ctx, originals)
             prompt = (f"{CLAIM_REPAIR}\n正文 JSON：{data(body)}\n核對分歧 JSON：{data(findings)}"
                       f"\n回查完整來源 JSON：{data(originals)}\n附圖順序 JSON：{data(list(images))}")
-            body = await checkpoint(ctx, "claim-repair", prompt, CLAIM_SYSTEM, parse_body,
+            body = await checkpoint(ctx, "claim-repair", prompt + retry, CLAIM_SYSTEM, parse_body,
                                     list(images.values()), attempts=4)
 
     raise GenerationError("機制或公式與完整來源仍有分歧，未寫入講義")
 
 
-async def reconcile(ctx: ExamContext, claim: str, verdicts: list[dict], refs: list[str], body: str) -> dict:
+async def reconcile(ctx: ExamContext, claim: str, verdicts: list[dict], refs: list[str], body: str, retry: str = "") -> dict:
     originals = full_material(ctx, refs)
     images = images_for(ctx, originals)
 
@@ -93,6 +124,8 @@ async def reconcile(ctx: ExamContext, claim: str, verdicts: list[dict], refs: li
         decision = json_reply(reply, dict)
         if decision.get("status") not in ("supported", "conflict", "unknown") or not decision.get("reason"):
             raise ValueError("跨來源裁決須有狀態與適用條件理由")
+        if decision["status"] == "unknown":
+            raise ValueError("無法裁決時不可宣稱通過，請提供 supported/conflict 與實際證據；仍不確定會標記人工確認")
         if decision["status"] != "unknown":
             proof(decision, originals, images)
         if decision["status"] == "conflict" and (not decision.get("correction") or not decision.get("counterexample")):
@@ -101,7 +134,7 @@ async def reconcile(ctx: ExamContext, claim: str, verdicts: list[dict], refs: li
 
     prompt = (f"{CLAIM_RECONCILE}\n完整正文 JSON：{data(body)}\nclaim JSON：{data(claim)}\n原核對分歧 JSON：{data(verdicts)}"
               f"\n回查完整來源 JSON：{data(originals)}\n附圖順序 JSON：{data(list(images))}")
-    decision = await checkpoint(ctx, "claim-reconcile", prompt, CLAIM_SYSTEM, parse, list(images.values()))
+    decision = await checkpoint(ctx, "claim-reconcile", prompt + retry, CLAIM_SYSTEM, parse, list(images.values()))
     if decision["status"] == "unknown":
         raise GenerationError("來源間存在無法裁決的機制／公式分歧，未寫入講義")
     return decision

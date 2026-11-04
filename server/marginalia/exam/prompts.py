@@ -120,6 +120,8 @@ CLAIM_RECONCILE = """同一 claim 在不同原頁出現分歧，請回查附帶�
 明示勘誤／補充修正優先於先前簡化說法；不同架構、模式或版本必須分開。不能只因較早頁面反對就推翻較後的修正。
 判定目前 claim 是 supported|conflict|unknown，附 reason、實際支持裁決的 source 與逐字 quote，或實際附圖的 kind=image、observation。
 若 conflict，提供 correction 與具體 counterexample；若無法裁決填 unknown，不得猜測。
+可用單一 source/quote，或 sources:[{"source":"deck#1","kind":"text","quote":"來源中的連續片段"}, ...]。
+每項證據都須來自所附原文；多段不連續引文用 quote 字串陣列，不要以省略號拼接。圖片證據需 kind=image、observation。
 只輸出一個 JSON 物件。"""
 
 FILL_SOLUTION_TASK = """只修訂這道填空的 solution，讓它與已逐項核對的 accepted variants 和同一題幹條件一致。

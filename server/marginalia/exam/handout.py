@@ -16,6 +16,7 @@ from .prompts import (
     MAP_SYSTEM,
     PLAN_TASK,
 )
+from .recovery import PendingSection, Recovery, pending_section
 from .schema import json_reply
 from .study import material, sources, topics
 
@@ -82,6 +83,7 @@ async def write_handout(ctx: ExamContext, progress: Progress) -> list[Section]:
     prompt = f"{PLAN_TASK}\n\n主題 JSON：{data(mapped)}\n考古題 JSON：{data(papers)}"
     plan = await checkpoint(ctx, "outline", prompt, MAP_SYSTEM, lambda s: parse_plan(s, mapped))
     progress(0.3, f"大綱完成：{len(plan)} 節，涵蓋 {len(ctx.decks)} 份簡報")
+    budget_recovery = Recovery(ctx, "handout-budget", [mapped, plan])
     by_id, by_ref = {t["id"]: t for t in mapped}, sources(ctx)
     done = 0
     # Include review and exercises in this conservative reading budget (about 180 chars/minute).
@@ -100,50 +102,71 @@ async def write_handout(ctx: ExamContext, progress: Progress) -> list[Section]:
 
         parse = lambda reply: section_body(reply, limit)
 
-        draft = await checkpoint(ctx, "section", base, HANDOUT_SYSTEM, parse, figures, attempts=4)
-        body = await checkpoint(ctx, "section-review", f"{base}\n草稿 JSON：{data(draft)}\n{HANDOUT_REVIEW}",
-                                HANDOUT_SYSTEM, parse, figures, attempts=4)
+        recovery = Recovery(ctx, "section", [chapter, base])
+        section = Section(chapter["title"], "", [(by_ref[r].deck, by_ref[r].index) for r in refs])
+        try:
+            draft = await checkpoint(ctx, "section", base + recovery.prompt, HANDOUT_SYSTEM, parse, figures, attempts=4)
+            body = await checkpoint(ctx, "section-review", f"{base}\n草稿 JSON：{data(draft)}\n{HANDOUT_REVIEW}" + recovery.prompt,
+                                    HANDOUT_SYSTEM, parse, figures, attempts=4)
+            section = Section(section.title, body, section.sources)
+        except GenerationError as exc:
+            recovery.failed(str(exc))
+            section = pending_section(section)
         done += 1
         progress(0.3 + 0.6 * done / len(plan), f"講義撰寫與核對 {done}/{len(plan)}（{chapter['title']}）")
-        return Section(chapter["title"], body, [(by_ref[r].deck, by_ref[r].index) for r in refs])
+        return section
 
     sections = await parallel(plan, one, config.GEN_CONCURRENCY)
     for _ in range(2):
-        sections = await compact_sections(ctx, sections, lambda f, m: progress(0.9 + 0.04 * f, m))
+        sections = await compact_sections(ctx, sections, lambda f, m: progress(0.9 + 0.04 * f, m), budget_recovery.prompt)
         async def verify(section):
             refs = [f"{d}#{i}" for d, i in section.sources]
-            body = await verify_claims(ctx, section.markdown, refs, lambda reply: section_body(reply, 6_000))
-            return Section(section.title, body, section.sources)
+            if isinstance(section, PendingSection):
+                return section
+            try:
+                body = await verify_claims(ctx, section.markdown, refs, lambda reply: section_body(reply, 6_000))
+                return Section(section.title, body, section.sources)
+            except GenerationError as exc:
+                return pending_section(section, getattr(exc, "verified_claims", []))
         progress(0.95, "回查完整來源的機制、公式與勘誤")
         sections = await parallel(sections, verify, config.GEN_CONCURRENCY)
         progress(0.99, "完整來源的機制／公式 claim 核對完成")
         if sum(len(s.markdown) for s in sections) <= TOTAL_CHARS:
-            progress(1.0, "講義與完整來源核對完成")
+            pending = sum(isinstance(s, PendingSection) for s in sections)
+            progress(1.0, f"講義完成（{pending} 節待人工確認）" if pending else "講義與完整來源核對完成")
             return sections
-    raise GenerationError("來源修正後超過閱讀預算，未寫入講義")
+    budget_recovery.failed("來源修正後仍超過閱讀預算")
+    return within_budget(sections)
 
 
-async def compact_sections(ctx: ExamContext, sections: list[Section], progress: Progress) -> list[Section]:
+async def compact_sections(ctx: ExamContext, sections: list[Section], progress: Progress, retry: str = "") -> list[Section]:
     """Budget the complete handout, allowing longer chapters to borrow from shorter ones."""
+    recovery = Recovery(ctx, "compaction", [[s.title, s.markdown, s.sources] for s in sections])
     current = sections
     for round_index in range(3):
         total = sum(len(s.markdown) for s in current)
         if total <= TOTAL_CHARS:
             progress(1.0, f"講義完成：{len(current)} 節，{total} 字元")
             return current
-        current = await _compact_round(ctx, current, total, round_index, progress)
+        previous = current
+        current = await _compact_round(ctx, current, total, round_index, progress, recovery.prompt + retry)
+        if any(isinstance(new, PendingSection) and not isinstance(old, PendingSection) for old, new in zip(previous, current, strict=True)):
+            recovery.failed("精簡段落格式修復次數用完")
     if sum(len(s.markdown) for s in current) > TOTAL_CHARS:
-        raise GenerationError("精簡後講義仍超過三小時閱讀預算，請縮小範圍後重新產生")
+        recovery.failed("三輪精簡後仍超過閱讀預算")
+        current = within_budget(current)
     progress(1.0, f"講義完成：{len(current)} 節")
     return current
 
 
 async def _compact_round(ctx: ExamContext, sections: list[Section], total: int, round_index: int,
-                         progress: Progress) -> list[Section]:
+                         progress: Progress, retry: str = "") -> list[Section]:
     done = 0
 
     async def one(section):
         nonlocal done
+        if isinstance(section, PendingSection):
+            return section
         # Per-chapter shares guide the editor; only the complete handout has a hard reading budget.
         budget = TOTAL_CHARS * (10 - 2 * round_index) // 10
         target = max(1, len(section.markdown) * budget // total)
@@ -152,10 +175,22 @@ async def _compact_round(ctx: ExamContext, sections: list[Section], total: int, 
                   "公式、必要圖表與易錯提醒，只留一個必要例子。刪除節末自我測驗及 details 答案，完整練習已另附模擬考。"
                   "不改數字、不新增原稿沒有的事實或來源。"
                   f"只輸出完整 markdown 本文。\n節標題 JSON：{data(section.title)}\n原稿 JSON：{data(section.markdown)}")
-        body = await checkpoint(ctx, "section-compact", prompt, COMPACT_SYSTEM,
-                                lambda reply: section_body(reply, 6_000), attempts=4)
+        try:
+            body = await checkpoint(ctx, "section-compact", prompt + retry, COMPACT_SYSTEM,
+                                    lambda reply: section_body(reply, 6_000), attempts=4)
+        except GenerationError:
+            return pending_section(section)
         done += 1
         progress((round_index + done / len(sections)) / 3, f"全份講義精簡 {round_index + 1}：{done}/{len(sections)}")
         return Section(section.title, body, section.sources)
 
     return await parallel(sections, one, config.GEN_CONCURRENCY)
+
+
+def within_budget(sections: list[Section]) -> list[Section]:
+    current = list(sections)
+    for i in sorted(range(len(current)), key=lambda i: len(current[i].markdown), reverse=True):
+        if sum(len(s.markdown) for s in current) <= TOTAL_CHARS:
+            break
+        current[i] = pending_section(current[i])
+    return current

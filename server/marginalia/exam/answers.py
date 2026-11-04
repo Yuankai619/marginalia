@@ -6,7 +6,7 @@ from copy import deepcopy
 
 from .claims import reconcile
 from .context import ExamContext
-from .evidence import full_material, images_for, proof, source_batches
+from .evidence import evidence_refs, full_material, images_for, proof, source_batches
 from .generation import GenerationError, checkpoint, data
 from .grade import normalize, objective
 from .prompts import (
@@ -15,12 +15,22 @@ from .prompts import (
     FILL_SOLUTION_REVIEW,
     FILL_SOLUTION_TASK,
 )
+from .recovery import Recovery
 from .schema import json_reply
 
 
 async def verify_fill(ctx: ExamContext, question: dict) -> dict:
     if question["type"] != "fill":
         return question
+    recovery = Recovery(ctx, 'fill', question)
+    try:
+        return await _verify_fill(ctx, question, recovery.prompt)
+    except GenerationError as exc:
+        recovery.failed(str(exc))
+        raise
+
+
+async def _verify_fill(ctx: ExamContext, question: dict, retry: str) -> dict:
     variants = [(i + 1, answer) for i, accepted in enumerate(question["blanks"]) for answer in accepted]
     decisions = {v: [] for v in variants}
     negatives = []
@@ -41,7 +51,10 @@ async def verify_fill(ctx: ExamContext, question: dict) -> dict:
                 if check.get("status") not in ("equivalent", "wrong", "unknown") or not check.get("reason"):
                     raise ValueError("變體必須說明同題幹條件下等價、錯誤或無證據的理由")
                 if check["status"] != "unknown":
-                    proof(check, originals, images)
+                    try:
+                        proof(check, originals, images)
+                    except (ValueError, TypeError) as exc:
+                        raise ValueError(f"第 {blank} 空答案 {answer!r} 的證據：{exc}") from exc
             near = raw.get("nearMisses")
             if not isinstance(near, list):
                 raise TypeError("必須列出相關但錯誤的答案反例")
@@ -55,7 +68,7 @@ async def verify_fill(ctx: ExamContext, question: dict) -> dict:
             return checks, near
 
         prompt = f"{ANSWER_TASK}\n題目 JSON：{data(question)}\n完整來源 JSON：{data(originals)}\n附圖順序 JSON：{data(list(images))}"
-        checks, near = await checkpoint(ctx, "fill-equivalence", prompt, ANSWER_SYSTEM, parse, list(images.values()))
+        checks, near = await checkpoint(ctx, "fill-equivalence", prompt + retry, ANSWER_SYSTEM, parse, list(images.values()))
         for check, variant in zip(checks, variants, strict=True):
             decisions[variant].append(check)
         negatives.extend(near)
@@ -69,8 +82,8 @@ async def verify_fill(ctx: ExamContext, question: dict) -> dict:
         if "equivalent" in statuses and "wrong" in statuses:
             verdicts = [{**c, "status": {"equivalent": "supported", "wrong": "conflict", "unknown": "unknown"}[c["status"]]}
                         for c in compared if c["status"] != "unknown"]
-            disputed_refs = list(dict.fromkeys(v["source"] for v in verdicts))
-            decision = await reconcile(ctx, f"第 {blank} 空可接受答案：{answer}", verdicts, disputed_refs, data(question))
+            disputed_refs = list(dict.fromkeys(r for v in verdicts for r in evidence_refs(v)))
+            decision = await reconcile(ctx, f"第 {blank} 空可接受答案：{answer}", verdicts, disputed_refs, data(question), retry)
             equivalent = decision["status"] == "supported"
         if equivalent:
             accepted.add(variant)
@@ -82,7 +95,7 @@ async def verify_fill(ctx: ExamContext, question: dict) -> dict:
     negatives = [n for n in negatives if normalize(n["answer"]) not in {normalize(a) for a in out["blanks"][n["blank"] - 1]}]
     missing = set(range(1, len(out["blanks"]) + 1)) - {n["blank"] for n in negatives}
     if missing:
-        negatives.extend(await counterexamples(ctx, out, refs, missing))
+        negatives.extend(await counterexamples(ctx, out, refs, missing, retry))
     for negative in negatives:
         i = negative["blank"] - 1
         if normalize(negative["answer"]) in {normalize(a) for a in out["blanks"][i]}:
@@ -92,11 +105,11 @@ async def verify_fill(ctx: ExamContext, question: dict) -> dict:
         if objective(out, answers)["status"] == "correct":
             raise GenerationError("填空錯答反例誤判滿分，已停止生成")
     if out["blanks"] != question["blanks"] and out.get("solution"):
-        out = await align_solution(ctx, out, refs, question["blanks"])
+        out = await align_solution(ctx, out, refs, question["blanks"], retry)
     return out
 
 
-async def counterexamples(ctx: ExamContext, question: dict, refs: list[str], missing: set[int]) -> list[dict]:
+async def counterexamples(ctx: ExamContext, question: dict, refs: list[str], missing: set[int], retry: str = "") -> list[dict]:
     originals = full_material(ctx, refs)
     images = images_for(ctx, originals)
 
@@ -116,14 +129,14 @@ async def counterexamples(ctx: ExamContext, question: dict, refs: list[str], mis
               '[{"blank":1,"answer":"錯答","source":"deck#1","quote":"逐字證據","reason":"不符合題幹條件"}]。'
               f"\n缺少反例的空格 JSON：{data(sorted(missing))}\n題目 JSON：{data(question)}"
               f"\n完整來源 JSON：{data(originals)}\n附圖順序 JSON：{data(list(images))}")
-    return await checkpoint(ctx, "fill-counterexamples", prompt, ANSWER_SYSTEM, parse, list(images.values()))
+    return await checkpoint(ctx, "fill-counterexamples", prompt + retry, ANSWER_SYSTEM, parse, list(images.values()))
 
 
-async def align_solution(ctx: ExamContext, question: dict, refs: list[str], previous: list) -> dict:
+async def align_solution(ctx: ExamContext, question: dict, refs: list[str], previous: list, retry: str = "") -> dict:
     originals = full_material(ctx, refs)
     images = images_for(ctx, originals)
     base = (f"\n題目 JSON：{data(question)}\n原答案集合 JSON：{data(previous)}"
-            f"\n完整來源 JSON：{data(originals)}\n附圖順序 JSON：{data(list(images))}")
+            f"\n完整來源 JSON：{data(originals)}\n附圖順序 JSON：{data(list(images))}" + retry)
 
     def parse(reply):
         result = json_reply(reply, dict).get("solution")
