@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from .. import config
+from .claims import verify_claims
 from .context import ExamContext, Progress, Section
 from .generation import GenerationError, checkpoint, data, parallel
 from .past import parse_uploads
@@ -107,7 +108,19 @@ async def write_handout(ctx: ExamContext, progress: Progress) -> list[Section]:
         return Section(chapter["title"], body, [(by_ref[r].deck, by_ref[r].index) for r in refs])
 
     sections = await parallel(plan, one, config.GEN_CONCURRENCY)
-    return await compact_sections(ctx, sections, lambda f, m: progress(0.9 + 0.1 * f, m))
+    for _ in range(2):
+        sections = await compact_sections(ctx, sections, lambda f, m: progress(0.9 + 0.04 * f, m))
+        async def verify(section):
+            refs = [f"{d}#{i}" for d, i in section.sources]
+            body = await verify_claims(ctx, section.markdown, refs, lambda reply: section_body(reply, 6_000))
+            return Section(section.title, body, section.sources)
+        progress(0.95, "回查完整來源的機制、公式與勘誤")
+        sections = await parallel(sections, verify, config.GEN_CONCURRENCY)
+        progress(0.99, "完整來源的機制／公式 claim 核對完成")
+        if sum(len(s.markdown) for s in sections) <= TOTAL_CHARS:
+            progress(1.0, "講義與完整來源核對完成")
+            return sections
+    raise GenerationError("來源修正後超過閱讀預算，未寫入講義")
 
 
 async def compact_sections(ctx: ExamContext, sections: list[Section], progress: Progress) -> list[Section]:

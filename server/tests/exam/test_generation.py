@@ -14,7 +14,11 @@ from marginalia.exam import context, handout, past, quiz, run, study
 from marginalia.exam.context import DeckDoc, Engine, SlideDoc, Upload
 from marginalia.exam.generation import GenerationError, checkpoint, parallel
 from marginalia.exam.prompts import (
+    ANSWER_SYSTEM,
+    CLAIM_INVENTORY,
+    CLAIM_TASK,
     COMPACT_SYSTEM,
+    DIVERSITY_TASK,
     HANDOUT_SYSTEM,
     MAP_TASK,
     PAST_REVIEW,
@@ -68,6 +72,24 @@ class FakeModel:
             mapped = field(prompt, "主題 JSON：")
             # Merge topics from different decks in one conceptual chapter.
             return encode([{"title": "行程與記憶體", "topics": [t["id"] for t in mapped]}])
+        if system == ANSWER_SYSTEM:
+            q = field(prompt, "題目 JSON：")
+            original = field(prompt, "完整來源 JSON：")[0]
+            evidence = {"source": original["source"], "quote": original["text"] or original["note"]}
+            return encode({"variants": [{"blank": i + 1, "answer": a, "status": "equivalent", "reason": "同條件", **evidence}
+                                         for i, accepted in enumerate(q["blanks"]) for a in accepted],
+                           "nearMisses": [{"blank": i + 1, "answer": f"related-wrong-{i}", "reason": "不同機制", **evidence}
+                                          for i in range(len(q["blanks"]))]})
+        if prompt.startswith(CLAIM_INVENTORY):
+            body = field(prompt, "正文 JSON：")
+            return encode([body.split("\n")[1]])
+        if prompt.startswith(CLAIM_TASK):
+            claims = field(prompt, "claim JSON：")
+            original = field(prompt, "完整來源 JSON：")[0]
+            return encode([{"claim": i + 1, "status": "supported", "source": original["source"],
+                            "quote": original["text"] or original["note"]} for i in range(len(claims))])
+        if prompt.startswith(DIVERSITY_TASK):
+            return "[]"
         if system in (HANDOUT_SYSTEM, COMPACT_SYSTEM):
             if self.fail_section:
                 raise RuntimeError("temporary model failure")

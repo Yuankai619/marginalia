@@ -6,7 +6,9 @@ import re
 from dataclasses import asdict
 
 from .. import config
+from .answers import verify_fill
 from .context import ExamContext, PastQuestion, Progress
+from .diversity import diversify
 from .generation import GenerationError, batches, checkpoint, data, parallel
 from .prompts import QUIZ_PAST, QUIZ_REVIEW, QUIZ_SYSTEM
 from .schema import OPTION_IDS, TYPES, clean_question, json_reply
@@ -108,7 +110,7 @@ async def write_quiz(ctx: ExamContext, past: list[PastQuestion], progress: Progr
         result = await checkpoint(ctx, "quiz-review", f"{base}{task}\n草稿 JSON：{data(draft)}\n{QUIZ_REVIEW}",
                                   QUIZ_SYSTEM, parse)
         done += 1
-        progress(0.2 + 0.8 * done / len(jobs), f"題目與答案核對 {done}/{len(jobs)} 批")
+        progress(0.2 + 0.65 * done / len(jobs), f"題目與答案核對 {done}/{len(jobs)} 批")
         return result
 
     results = await parallel(jobs, one, config.GEN_CONCURRENCY)
@@ -120,5 +122,9 @@ async def write_quiz(ctx: ExamContext, past: list[PastQuestion], progress: Progr
             if key in seen:
                 raise GenerationError("新題出現重複題幹，請調整題目數或範圍後重新產生")
             seen.add(key)
+    progress(0.86, "逐項核對填空變體、錯答反例與詳解一致性")
+    questions = await parallel(questions, lambda q: verify_fill(ctx, q), config.GEN_CONCURRENCY)
+    progress(0.95, "逐項填空等價與錯答反例核對完成，整卷語意去重中")
+    questions = await diversify(ctx, questions, mapped)
     progress(1.0, f"完成 {len(questions)} 題（考古題 {len(preserved)} 題）")
     return questions

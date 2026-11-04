@@ -15,7 +15,7 @@ from ..jobs import JobError
 from ..store import _directory_fd, atomic_output
 from .context import ExamContext, SlideDoc
 
-VERSION = 1
+VERSION = 2  # Full-source claims, variant equivalence and whole-quiz diversity gates.
 
 
 class GenerationError(JobError):

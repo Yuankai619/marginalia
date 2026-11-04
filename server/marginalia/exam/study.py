@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .. import config
 from .context import ExamContext, Progress
 from .generation import GenerationError, batches, checkpoint, data, parallel, slide_data
@@ -13,20 +15,27 @@ def sources(ctx: ExamContext) -> dict:
     return {f"{s.deck}#{s.index}": s for d in ctx.decks for s in d.slides}
 
 
+def excerpt(text: str, budget: int) -> str:
+    """Keep both ends and every trailing correction section, even when it exceeds the excerpt budget."""
+    if len(text) <= budget:
+        return text
+    correction = re.search(r"(?im)^#{1,6}\s*(?:補充|勘誤|修正|更正|訂正|correction|errata)", text)
+    tail = text[correction.start():] if correction else text[-max(1, budget // 2):]
+    head = text[:max(0, budget - len(tail))]
+    return head + "\n（中段節錄省略；核對時讀完整原頁）\n" + tail
+
+
 def material(ctx: ExamContext, refs: list[str], budget: int = 48_000) -> list[dict]:
-    """Spread a section's source budget evenly, so its final source is never silently omitted."""
+    """Writing excerpts retain corrections; semantic gates separately read full source batches."""
     by_ref = sources(ctx)
     selected = [by_ref[r] for r in dict.fromkeys(refs) if r in by_ref]
     share = budget // max(1, len(selected))
     out = []
     for slide in selected:
         item = slide_data(slide)
-        # Topic summaries preserve the core claims; these excerpts add evidence and exact terminology.
         for key in ("text", "speakerNotes", "note"):
-            if len(item[key]) > share // 4:
-                item[key] = item[key][:share // 4] + "（本欄節錄）"
-        transcript = data(item["transcript"])
-        item["transcript"] = transcript[:share // 4] + ("（逐字稿節錄）" if len(transcript) > share // 4 else "")
+            item[key] = excerpt(item[key], share // 4)
+        item["transcript"] = excerpt(data(item["transcript"]), share // 4)
         out.append(item)
     return out
 
