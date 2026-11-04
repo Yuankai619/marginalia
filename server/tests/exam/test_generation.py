@@ -14,6 +14,7 @@ from marginalia.exam import context, handout, past, quiz, run, study
 from marginalia.exam.context import DeckDoc, Engine, SlideDoc, Upload
 from marginalia.exam.generation import GenerationError, checkpoint, parallel
 from marginalia.exam.prompts import (
+    COMPACT_SYSTEM,
     HANDOUT_SYSTEM,
     MAP_TASK,
     PAST_REVIEW,
@@ -67,7 +68,7 @@ class FakeModel:
             mapped = field(prompt, "主題 JSON：")
             # Merge topics from different decks in one conceptual chapter.
             return encode([{"title": "行程與記憶體", "topics": [t["id"] for t in mapped]}])
-        if system == HANDOUT_SYSTEM:
+        if system in (HANDOUT_SYSTEM, COMPACT_SYSTEM):
             if self.fail_section:
                 raise RuntimeError("temporary model failure")
             return "> [!IMPORTANT]\n> ==行程有獨立狀態==。\n\n先理解位址與狀態，再理解切換。"
@@ -387,7 +388,7 @@ def test_handout_length_repair_reads_previous_draft_and_can_resume(setup):
 def test_complete_handout_budget_compacts_uneven_chapters(setup):
     exam, fake = setup
     ctx = context.load(exam)
-    sections = [context.Section(f"章節{i}", "> [!IMPORTANT]\n> ==結論==\n" + "x" * 5000, [("l2", 1)]) for i in range(6)]
+    sections = [context.Section(f"章節{i}", "> [!IMPORTANT]\n> ==結論==\n" + "x" * 5500, [("l2", 1)]) for i in range(6)]
     result = asyncio.run(handout.compact_sections(ctx, sections, lambda *_: None))
     assert sum(len(s.markdown) for s in result) <= handout.TOTAL_CHARS
     assert [(s.title, s.sources) for s in result] == [(s.title, s.sources) for s in sections]
@@ -405,3 +406,19 @@ def test_small_outline_requested_length_is_below_hard_limit(setup):
     for prompt in prompts:
         match = re.search(r"本節以 (\d+) 字元為目標，暫時上限 (\d+)", prompt)
         assert match and int(match[1]) < int(match[2]) <= 6000
+
+
+
+def test_compaction_allows_a_chapter_to_borrow_unused_budget(setup):
+    exam, _ = setup
+    ctx = context.load(exam)
+    sections = [context.Section(f"章節{i}", "> [!IMPORTANT]\n> ==結論==\n" + "x" * 5500) for i in range(6)]
+
+    async def uneven(prompt, **kwargs):
+        title = field(prompt, "節標題 JSON：")
+        return "> [!IMPORTANT]\n> ==結論==\n" + "x" * (5100 if title == "章節0" else 4600)
+
+    ctx.llm = uneven
+    result = asyncio.run(handout.compact_sections(ctx, sections, lambda *_: None))
+    assert len(result[0].markdown) > handout.TOTAL_CHARS // len(sections)
+    assert sum(len(s.markdown) for s in result) <= handout.TOTAL_CHARS

@@ -8,13 +8,19 @@ from .. import config
 from .context import ExamContext, Progress, Section
 from .generation import GenerationError, checkpoint, data, parallel
 from .past import parse_uploads
-from .prompts import HANDOUT_REVIEW, HANDOUT_SYSTEM, MAP_SYSTEM, PLAN_TASK
+from .prompts import (
+    COMPACT_SYSTEM,
+    HANDOUT_REVIEW,
+    HANDOUT_SYSTEM,
+    MAP_SYSTEM,
+    PLAN_TASK,
+)
 from .schema import json_reply
 from .study import material, sources, topics
 
 _SOURCES = re.compile(r"\A<!--\s*sources:\s*(.*?)\s*-->\s*\n?", re.IGNORECASE)
 _REF = re.compile(r"([\w][\w-]*)#(\d+)")
-TOTAL_CHARS = 27_000
+TOTAL_CHARS = 30_000
 
 
 def split_sections(text: str) -> list[Section]:
@@ -77,8 +83,8 @@ async def write_handout(ctx: ExamContext, progress: Progress) -> list[Section]:
     progress(0.3, f"大綱完成：{len(plan)} 節，涵蓋 {len(ctx.decks)} 份簡報")
     by_id, by_ref = {t["id"]: t for t in mapped}, sources(ctx)
     done = 0
-    # Include review and exercises in this conservative reading budget (about 150 chars/minute).
-    target = min(6_000, TOTAL_CHARS // len(plan))
+    # Include review and exercises in this conservative reading budget (about 180 chars/minute).
+    target = min(6_000, (TOTAL_CHARS * 9 // 10) // len(plan))
     limit = 6_000  # Intermediate drafts may grow during review; compact the complete handout afterward.
 
     async def one(chapter):
@@ -106,27 +112,37 @@ async def write_handout(ctx: ExamContext, progress: Progress) -> list[Section]:
 
 async def compact_sections(ctx: ExamContext, sections: list[Section], progress: Progress) -> list[Section]:
     """Budget the complete handout, allowing longer chapters to borrow from shorter ones."""
-    total = sum(len(s.markdown) for s in sections)
-    if total <= TOTAL_CHARS:
-        progress(1.0, f"講義完成：{len(sections)} 節，{total} 字元")
-        return sections
+    current = sections
+    for round_index in range(3):
+        total = sum(len(s.markdown) for s in current)
+        if total <= TOTAL_CHARS:
+            progress(1.0, f"講義完成：{len(current)} 節，{total} 字元")
+            return current
+        current = await _compact_round(ctx, current, total, round_index, progress)
+    if sum(len(s.markdown) for s in current) > TOTAL_CHARS:
+        raise GenerationError("精簡後講義仍超過三小時閱讀預算，請縮小範圍後重新產生")
+    progress(1.0, f"講義完成：{len(current)} 節")
+    return current
+
+
+async def _compact_round(ctx: ExamContext, sections: list[Section], total: int, round_index: int,
+                         progress: Progress) -> list[Section]:
     done = 0
 
     async def one(section):
         nonlocal done
-        # Leave room for formatting and rounding while preserving each chapter's relative share.
-        limit = max(1, len(section.markdown) * (TOTAL_CHARS * 9 // 10) // total)
-        prompt = (f"整份講義超過三小時預算，精簡這一節。最多 {limit} 字元（含所有 markdown），"
-                  f"以 {limit * 2 // 3} 字元為目標，留餘裕。只刪重複與贅字、合併句子；保留核心機制、"
-                  "公式、例子、必要圖表、易錯提醒與理解題。不改數字、不新增原稿沒有的事實或來源。"
+        # Per-chapter shares guide the editor; only the complete handout has a hard reading budget.
+        budget = TOTAL_CHARS * (10 - 2 * round_index) // 10
+        target = max(1, len(section.markdown) * budget // total)
+        prompt = (f"整份講義超過三小時預算，精簡這一節。最多 {target} 字元（含所有 markdown），"
+                  f"以 {target // 2} 字元為目標，留餘裕。只刪重複與贅字、合併句子；保留核心機制、"
+                  "公式、必要圖表與易錯提醒，只留一個必要例子。刪除節末自我測驗及 details 答案，完整練習已另附模擬考。"
+                  "不改數字、不新增原稿沒有的事實或來源。"
                   f"只輸出完整 markdown 本文。\n節標題 JSON：{data(section.title)}\n原稿 JSON：{data(section.markdown)}")
-        body = await checkpoint(ctx, "section-compact", prompt, HANDOUT_SYSTEM,
-                                lambda reply: section_body(reply, limit), attempts=4)
+        body = await checkpoint(ctx, "section-compact", prompt, COMPACT_SYSTEM,
+                                lambda reply: section_body(reply, 6_000), attempts=4)
         done += 1
-        progress(done / len(sections), f"全份講義精簡 {done}/{len(sections)}")
+        progress((round_index + done / len(sections)) / 3, f"全份講義精簡 {round_index + 1}：{done}/{len(sections)}")
         return Section(section.title, body, section.sources)
 
-    result = await parallel(sections, one, config.GEN_CONCURRENCY)
-    if sum(len(s.markdown) for s in result) > TOTAL_CHARS:
-        raise GenerationError("精簡後講義仍超過三小時閱讀預算，請重新產生")
-    return result
+    return await parallel(sections, one, config.GEN_CONCURRENCY)
