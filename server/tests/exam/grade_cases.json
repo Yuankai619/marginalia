@@ -114,6 +114,28 @@
         ]
       ],
       "points": 2
+    },
+    {
+      "id": "real-mode-ivt",
+      "type": "fill",
+      "prompt": "real mode：{{1}} × 4 查 {{2}}；ISR 分 {{3}}/{{4}}。",
+      "points": 4,
+      "blanks": [
+        [
+          "IVN",
+          "Interrupt Vector Number"
+        ],
+        [
+          "IVT",
+          "Interrupt Vector Table"
+        ],
+        [
+          "top half"
+        ],
+        [
+          "bottom half"
+        ]
+      ]
     }
   ],
   "cases": [
@@ -255,6 +277,39 @@
       ],
       "status": "correct",
       "score": 2
+    },
+    {
+      "question": "real-mode-ivt",
+      "answer": [
+        "IVN",
+        "IVT",
+        "top half",
+        "bottom half"
+      ],
+      "score": 4,
+      "status": "correct"
+    },
+    {
+      "question": "real-mode-ivt",
+      "answer": [
+        "IVN",
+        "IDT",
+        "top half",
+        "bottom half"
+      ],
+      "score": 3,
+      "status": "partial"
+    },
+    {
+      "question": "real-mode-ivt",
+      "answer": [
+        "IVN",
+        "Interrupt Descriptor Table",
+        "top half",
+        "bottom half"
+      ],
+      "score": 3,
+      "status": "partial"
     }
   ]
 }

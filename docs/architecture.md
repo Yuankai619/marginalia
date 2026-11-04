@@ -352,6 +352,18 @@ courses/<c>/exams/<exam>/
   The user's edits are protected like notes: generation never overwrites an `edited` section; if any section is
   `edited`, handout generation keeps the whole handout (result `kept`) unless `force`. A regenerated handout
   replaces every section file atomically per file and removes surplus non-edited `NNN.md` beyond the new count.
+  Bounded quality repair may complete with partial content. Sections that still have unsupported mechanisms or
+  formulas show a visible `WARNING` / `==本節待人工確認==` callout instead of the unverified draft; verified excerpts
+  and source slides remain. Unverified question answers become `short` questions with no objective key or rubric,
+  a visible manual-review warning and a hidden original solution. Past-paper stems and options remain intact.
+  Redundant new questions that cannot be replaced are omitted (or a source-linked manual placeholder keeps an
+  otherwise uncovered deck visible); the quiz shows any reduced question count. These warnings use the existing
+  Markdown renderer in both local and static views, without adding API fields.
+  A degraded phase records a fresh repair seed and its failure reason in `work/`. An ordinary regeneration reuses
+  successful prerequisites but gives the failed phase new model calls; a failed replacement chain is not a terminal
+  cached outcome. Evidence accepts either `source` / `quote` or `sources` evidence objects, validating every record
+  against the complete source. Formatting-only quote differences are allowed, but formulas and numbers are preserved.
+
 - `quiz.json`:
 
   ```json

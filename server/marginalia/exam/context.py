@@ -6,6 +6,7 @@ docs/architecture.md (Exam prep → Generation pipeline interface).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -97,10 +98,18 @@ class ExamContext:
     uploads: list[Upload]
     work: Path
     engine: Engine = field(default_factory=Engine)
+    _study_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _topics: list[dict] | None = field(default=None, repr=False)
+    _past_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _past: list[PastQuestion] | None = field(default=None, repr=False)
+    _llm_limit: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(max(1, config.GEN_CONCURRENCY)), repr=False,
+    )
 
     async def llm(self, prompt: str, *, system: str = "", images: list[Path] | tuple[Path, ...] = (),
                   model: str | None = None) -> str:  # fmt: skip
-        return await call_model(self.engine, prompt, system=system, images=images, model=model)
+        async with self._llm_limit:
+            return await call_model(self.engine, prompt, system=system, images=images, model=model)
 
     def slide_count(self) -> dict[str, int]:
         return {d.id: len(d.slides) for d in self.decks}

@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 
 from marginalia import config
 from marginalia.api import create_app
-from marginalia.exam import context, grade, routes, run, schema
+from marginalia.exam import grade, handout, past, quiz, routes, run, schema
+from marginalia.exam.context import PastQuestion
 from marginalia.exam.store import Exam
 from marginalia.export import export_courses
 from marginalia.jobs import JobRunner
@@ -242,21 +243,28 @@ def test_generate_keeps_past_papers_fixes_images_and_protects_edits(client, cour
     exam.save_text("1. 什麼是 deadlock？")
     calls = []
 
-    async def fake(engine, prompt, *, system="", images=(), model=None):
-        calls.append(prompt)
-        if "考古題檔案" in prompt:
-            return '[{"number": "1", "type": "short", "prompt": "什麼是 deadlock？"}, {"number": "2", "type": "short", "prompt": "解釋 mutex"}]'
-        if "講義" in system:
-            return ("# 行程\n<!-- sources: l2#1, l2#9, secret#1 -->\n> [!IMPORTANT]\n> 重點 ![圖](slide:l2/2) ![壞](slide:l2/9)"
-                    " ![無](assets/none.png) ![外](https://x.example/a.png)\n\n# 空\n")
-        return json.dumps([
-            {"type": "short", "origin": "past", "pastRef": exam.uploads()[0]["name"], "prompt": "什麼是 deadlock？",
+    async def fake_past(ctx, progress):
+        calls.append(str([d.id for d in ctx.decks]))
+        name = ctx.uploads[0].name
+        return [PastQuestion(name, "1", "short", "什麼是 deadlock？"),
+                PastQuestion(name, "2", "short", "解釋 mutex")]
+
+    async def fake_handout(ctx, progress):
+        return handout.split_sections(
+            "# 行程\n<!-- sources: l2#1, l2#9, secret#1 -->\n> [!IMPORTANT]\n> 重點 ![圖](slide:l2/2) ![壞](slide:l2/9)"
+            " ![無](assets/none.png) ![外](https://x.example/a.png)\n\n# 空\n")
+
+    async def fake_quiz(ctx, parsed, progress):
+        return [
+            {"type": "short", "origin": "past", "pastRef": parsed[0].upload, "prompt": "什麼是 deadlock？",
              "points": 5, "solution": "互相等待"},
             {"type": "choice", "prompt": "選", "options": [{"id": "A", "text": "1"}, {"id": "B", "text": "2"}], "answer": ["A"]},
             {"type": "fill", "prompt": "壞題目"},
-        ], ensure_ascii=False)  # fmt: skip
+        ]
 
-    monkeypatch.setattr(context, "call_model", fake)
+    monkeypatch.setattr(past, "parse_uploads", fake_past)
+    monkeypatch.setattr(handout, "write_handout", fake_handout)
+    monkeypatch.setattr(quiz, "write_quiz", fake_quiz)
     message = run.generate_exam(course, "midterm")
     assert "講義 1 節" in message and "題目 3 題" in message and "略過 1 題" in message
     meta, body = exam.section(1)
