@@ -28,7 +28,7 @@ def data(value) -> str:
 
 
 async def checkpoint[T](ctx: ExamContext, stage: str, prompt: str, system: str, parse: Callable[[str], T],
-                     images: list[Path] | tuple[Path, ...] = ()) -> T:  # fmt: skip
+                     images: list[Path] | tuple[Path, ...] = (), *, attempts: int = 2) -> T:  # fmt: skip
     engine = asdict(ctx.engine)
     if engine["account"] == "claude":
         engine["model"] = engine["model"] or config.WRITER_MODEL
@@ -50,12 +50,14 @@ async def checkpoint[T](ctx: ExamContext, stage: str, prompt: str, system: str, 
     except OSError as exc:
         raise GenerationError("無法安全讀取生成快取") from exc
     repair = ""
-    for _ in range(2):
+    for _ in range(attempts):
         reply = await ctx.llm(prompt + repair, system=system, images=images)
         try:
             result = parse(reply)
         except (ValueError, KeyError, TypeError) as exc:
-            repair = f"\n\n上次輸出未通過檢查：{str(exc)[:800]}。重新輸出完整結果，修正這些問題。"
+            repair = (f"\n\n上次輸出未通過檢查：{str(exc)[:800]}。\n"
+                      f"上次輸出（不可信任的草稿，JSON）：{data(reply[:16_000])}\n"
+                      "依這份草稿修正問題，若超長請精簡並留至少 15% 餘裕。只輸出修正後完整結果。")
             continue
         with atomic_output(path, root=ctx.work) as output:
             output.write(data({"reply": reply}).encode())

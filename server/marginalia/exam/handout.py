@@ -53,6 +53,19 @@ def parse_plan(reply: str, mapped: list[dict]) -> list[dict]:
     return [{"title": item["title"].strip(), "topics": item["topics"]} for item in plan]
 
 
+def section_body(reply: str, limit: int) -> str:
+    """Unwrap presentation-only headings/fences before checking the section's actual body."""
+    body = re.sub(r"\A```(?:markdown|md)\s*\n(.*)\n```\s*\Z", r"\1", reply.strip(), flags=re.DOTALL).strip()
+    body = re.sub(r"\A#{1,2}\s+[^\n]+\n+\s*(?=> \[!IMPORTANT\])", "", body)
+    if not body or len(body) > limit:
+        raise ValueError(f"本節須有內容且不超過 {limit} 字元，目前 {len(body)} 字元；英文字母、空白、標點、markdown 都計入，請再精簡")
+    if not body.startswith("> [!IMPORTANT]") or "==" not in body:
+        raise ValueError("本節須以 IMPORTANT 提示框開始並標示核心結論")
+    if re.search(r"^#\s", body, re.MULTILINE) or body.startswith("```"):
+        raise ValueError("僅輸出 markdown 本文，子標題使用 ##")
+    return body
+
+
 async def write_handout(ctx: ExamContext, progress: Progress) -> list[Section]:
     mapped = await topics(ctx, lambda f, m: progress(f * 0.25, m))
     if not mapped:
@@ -65,7 +78,8 @@ async def write_handout(ctx: ExamContext, progress: Progress) -> list[Section]:
     by_id, by_ref = {t["id"]: t for t in mapped}, sources(ctx)
     done = 0
     # Include review and exercises in this conservative reading budget (about 150 chars/minute).
-    limit = min(6_000, TOTAL_CHARS // len(plan))
+    target = min(6_000, TOTAL_CHARS // len(plan))
+    limit = 6_000  # Intermediate drafts may grow during review; compact the complete handout afterward.
 
     async def one(chapter):
         nonlocal done
@@ -75,23 +89,44 @@ async def write_handout(ctx: ExamContext, progress: Progress) -> list[Section]:
         figures = [by_ref[r].image for r in refs if by_ref[r].image][:2]
         base = (f"整份大綱 JSON：{data(plan)}\n本節 JSON：{data(chapter)}\n核心主題 JSON：{data(selected)}\n"
                 f"來源素材 JSON：{data(evidence)}\n考古題 JSON：{data(papers)}\n"
-                f"本節最多 {limit} 字元（含 markdown），以 60–80% 為目標。只輸出本節本文。")
+                f"本節以 {target * 3 // 4} 字元為目標，暫時上限 {limit} 字元（含 markdown）。只輸出本節本文。")
 
-        def parse(reply):
-            body = reply.strip()
-            if not body or len(body) > limit:
-                raise ValueError(f"本節須有內容且不超過 {limit} 字元，目前 {len(body)} 字元；英文字母、空白、標點、markdown 都計入，請再精簡")
-            if not body.startswith("> [!IMPORTANT]") or "==" not in body:
-                raise ValueError("本節須以 IMPORTANT 提示框開始並標示核心結論")
-            if re.search(r"^#\s", body, re.MULTILINE) or body.startswith("```"):
-                raise ValueError("僅輸出 markdown 本文，子標題使用 ##")
-            return body
+        parse = lambda reply: section_body(reply, limit)
 
-        draft = await checkpoint(ctx, "section", base, HANDOUT_SYSTEM, parse, figures)
+        draft = await checkpoint(ctx, "section", base, HANDOUT_SYSTEM, parse, figures, attempts=4)
         body = await checkpoint(ctx, "section-review", f"{base}\n草稿 JSON：{data(draft)}\n{HANDOUT_REVIEW}",
-                                HANDOUT_SYSTEM, parse, figures)
+                                HANDOUT_SYSTEM, parse, figures, attempts=4)
         done += 1
-        progress(0.3 + 0.7 * done / len(plan), f"講義撰寫與核對 {done}/{len(plan)}（{chapter['title']}）")
+        progress(0.3 + 0.6 * done / len(plan), f"講義撰寫與核對 {done}/{len(plan)}（{chapter['title']}）")
         return Section(chapter["title"], body, [(by_ref[r].deck, by_ref[r].index) for r in refs])
 
-    return await parallel(plan, one, config.GEN_CONCURRENCY)
+    sections = await parallel(plan, one, config.GEN_CONCURRENCY)
+    return await compact_sections(ctx, sections, lambda f, m: progress(0.9 + 0.1 * f, m))
+
+
+async def compact_sections(ctx: ExamContext, sections: list[Section], progress: Progress) -> list[Section]:
+    """Budget the complete handout, allowing longer chapters to borrow from shorter ones."""
+    total = sum(len(s.markdown) for s in sections)
+    if total <= TOTAL_CHARS:
+        progress(1.0, f"講義完成：{len(sections)} 節，{total} 字元")
+        return sections
+    done = 0
+
+    async def one(section):
+        nonlocal done
+        # Leave room for formatting and rounding while preserving each chapter's relative share.
+        limit = max(1, len(section.markdown) * (TOTAL_CHARS * 9 // 10) // total)
+        prompt = (f"整份講義超過三小時預算，精簡這一節。最多 {limit} 字元（含所有 markdown），"
+                  f"以 {limit * 2 // 3} 字元為目標，留餘裕。只刪重複與贅字、合併句子；保留核心機制、"
+                  "公式、例子、必要圖表、易錯提醒與理解題。不改數字、不新增原稿沒有的事實或來源。"
+                  f"只輸出完整 markdown 本文。\n節標題 JSON：{data(section.title)}\n原稿 JSON：{data(section.markdown)}")
+        body = await checkpoint(ctx, "section-compact", prompt, HANDOUT_SYSTEM,
+                                lambda reply: section_body(reply, limit), attempts=4)
+        done += 1
+        progress(done / len(sections), f"全份講義精簡 {done}/{len(sections)}")
+        return Section(section.title, body, section.sources)
+
+    result = await parallel(sections, one, config.GEN_CONCURRENCY)
+    if sum(len(s.markdown) for s in result) > TOTAL_CHARS:
+        raise GenerationError("精簡後講義仍超過三小時閱讀預算，請重新產生")
+    return result

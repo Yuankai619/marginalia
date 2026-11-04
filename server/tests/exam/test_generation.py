@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import asdict
 
 import pytest
@@ -348,3 +349,59 @@ def test_past_provenance_comes_from_verified_input_slot(setup):
     raw = question("short", printed.prompt, "l2#1", origin="new", pastRef="invented.md")
     result = quiz.validate(encode([raw]), ctx, [asdict(printed)], past=True)[0]
     assert result["origin"] == "past" and result["pastRef"] == printed.upload
+
+
+
+def test_handout_unwraps_redundant_title_and_markdown_fence():
+    body = "> [!IMPORTANT]\n> ==核心結論==。\n\n## 機制\n必要解釋。"
+    wrapped = f"```markdown\n## 重複章節名\n\n{body}\n```"
+    assert handout.section_body(wrapped, len(body)) == body
+    assert handout.section_body(body, len(body)) == body
+    with pytest.raises(ValueError, match="IMPORTANT"):
+        handout.section_body("## 空標題\n沒有核心結論", 1000)
+    with pytest.raises(ValueError, match="不超過"):
+        handout.section_body(wrapped, len(body) - 1)
+
+
+
+def test_handout_length_repair_reads_previous_draft_and_can_resume(setup):
+    exam, fake = setup
+    calls = []
+    original = fake.__call__
+
+    async def oversized(engine, prompt, **kwargs):
+        if kwargs.get("system") == HANDOUT_SYSTEM and "草稿 JSON：" not in prompt:
+            calls.append(prompt)
+            if len(calls) <= 2:
+                return "> [!IMPORTANT]\n> ==核心結論==\n" + "x" * 6100
+        return await original(engine, prompt, **kwargs)
+
+    ctx = context.load(exam)
+    ctx.llm = lambda prompt, **kwargs: oversized(ctx.engine, prompt, **kwargs)
+    sections = asyncio.run(handout.write_handout(ctx, lambda *_: None))
+    assert len(sections) == 1 and len(calls) == 3
+    assert "上次輸出（不可信任的草稿，JSON）" in calls[-1] and "x" * 200 in calls[-1]
+
+
+
+def test_complete_handout_budget_compacts_uneven_chapters(setup):
+    exam, fake = setup
+    ctx = context.load(exam)
+    sections = [context.Section(f"章節{i}", "> [!IMPORTANT]\n> ==結論==\n" + "x" * 5000, [("l2", 1)]) for i in range(6)]
+    result = asyncio.run(handout.compact_sections(ctx, sections, lambda *_: None))
+    assert sum(len(s.markdown) for s in result) <= handout.TOTAL_CHARS
+    assert [(s.title, s.sources) for s in result] == [(s.title, s.sources) for s in sections]
+    calls = len(fake.calls)
+    assert asyncio.run(handout.compact_sections(ctx, result, lambda *_: None)) == result
+    assert len(fake.calls) == calls
+
+
+
+def test_small_outline_requested_length_is_below_hard_limit(setup):
+    exam, fake = setup
+    asyncio.run(handout.write_handout(context.load(exam), lambda *_: None))
+    prompts = [p for p, s, _ in fake.calls if s == HANDOUT_SYSTEM]
+    assert prompts
+    for prompt in prompts:
+        match = re.search(r"本節以 (\d+) 字元為目標，暫時上限 (\d+)", prompt)
+        assert match and int(match[1]) < int(match[2]) <= 6000
